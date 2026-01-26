@@ -1,0 +1,384 @@
+# Reusable workflow for building, signing, and publishing .NET desktop applications
+#
+# Supports Windows (Azure Trusted Signing), macOS (Developer ID + Notarization), and Linux
+# Uses Velopack for cross-platform packaging and auto-updates
+#
+# Usage in calling repository:
+#
+# name: Publish Desktop
+# on:
+#   workflow_dispatch:
+#
+# jobs:
+#   publish:
+#     uses: mythetech/workflows/.github/workflows/desktop-publish.yml@main
+#     with:
+#       app_name: "Horizon"
+#       project_path: "Horizon/Horizon.csproj"
+#       test_project: "Horizon.Test/Horizon.Test.csproj"
+#       entitlements_path: "Horizon/Horizon.entitlements"
+#       icon_windows: "Horizon/wwwroot/logo.ico"
+#       icon_linux: "Horizon/wwwroot/logo.png"
+#       icon_macos: "Horizon/wwwroot/logo.icns"
+#       storage_account: "stmythetechglobal"
+#       storage_container: "preview"
+#     secrets: inherit
+
+name: Desktop Publish
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Application name (e.g., Horizon)'
+        type: string
+        required: true
+      project_path:
+        description: 'Path to the main project file (e.g., Horizon/Horizon.csproj)'
+        type: string
+        required: true
+      test_project:
+        description: 'Path to the test project (e.g., Horizon.Test/Horizon.Test.csproj)'
+        type: string
+        required: false
+      entitlements_path:
+        description: 'Path to macOS entitlements file (e.g., Horizon/Horizon.entitlements)'
+        type: string
+        required: true
+      icon_windows:
+        description: 'Path to Windows icon file (.ico)'
+        type: string
+        required: true
+      icon_linux:
+        description: 'Path to Linux icon file (.png)'
+        type: string
+        required: true
+      icon_macos:
+        description: 'Path to macOS icon file (.icns)'
+        type: string
+        required: true
+      dotnet_version:
+        description: '.NET SDK version to use'
+        type: string
+        default: '10.0.x'
+      versioning:
+        description: 'Versioning strategy: "nbgv" (Nerdbank.GitVersioning) or "run_number" (0.0.$RUN_NUMBER)'
+        type: string
+        default: 'nbgv'
+      storage_account:
+        description: 'Azure Storage account name for uploads'
+        type: string
+        required: true
+      storage_container:
+        description: 'Azure Storage container for versioned/latest releases'
+        type: string
+        required: true
+      releases_container:
+        description: 'Azure Storage container for Velopack auto-update files'
+        type: string
+        default: 'releases'
+      enable_signing:
+        description: 'Enable code signing (Windows and macOS)'
+        type: boolean
+        default: true
+      enable_smoke_tests:
+        description: 'Enable smoke tests after publishing'
+        type: boolean
+        default: true
+      enable_blob_upload:
+        description: 'Enable uploading to Azure Blob Storage'
+        type: boolean
+        default: true
+    secrets:
+      # Windows Signing
+      AZURE_TRUSTED_SIGNING_ENDPOINT:
+        required: false
+      AZURE_TRUSTED_SIGNING_ACCOUNT_NAME:
+        required: false
+      AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME:
+        required: false
+      AZURE_CREDENTIALS:
+        required: false
+      # macOS Signing
+      BUILD_CERTIFICATE_BASE64:
+        required: false
+      INSTALLER_CERTIFICATE_BASE64:
+        required: false
+      P12_PASSWORD:
+        required: false
+      APPLE_USERNAME_ID:
+        required: false
+      APPLE_APP_ID_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      KEYCHAIN_PASSWORD:
+        required: false
+      MACOS_SIGN_APP_IDENTITY:
+        required: false
+      MACOS_SIGN_INSTALL_IDENTITY:
+        required: false
+      # Storage
+      BLOB_SAS_TOKEN:
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet_version }}
+
+    - name: Install nbgv
+      if: inputs.versioning == 'nbgv'
+      run: dotnet tool install -g nbgv
+
+    - name: Get Version (nbgv)
+      if: inputs.versioning == 'nbgv'
+      id: get_version_nbgv
+      run: echo "VERSION=$(nbgv get-version -v SemVer2)" >> $GITHUB_OUTPUT
+
+    - name: Get Version (run_number)
+      if: inputs.versioning == 'run_number'
+      id: get_version_run
+      run: echo "VERSION=0.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+    - name: Set Version Output
+      id: get_version
+      run: |
+        if [ "${{ inputs.versioning }}" = "nbgv" ]; then
+          echo "VERSION=${{ steps.get_version_nbgv.outputs.VERSION }}" >> $GITHUB_OUTPUT
+        else
+          echo "VERSION=${{ steps.get_version_run.outputs.VERSION }}" >> $GITHUB_OUTPUT
+        fi
+      shell: bash
+
+    - name: Execute unit tests
+      if: inputs.test_project != ''
+      run: dotnet test "${{ inputs.test_project }}"
+      env:
+        Configuration: Release
+
+  publish:
+    needs: test
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            rid: win-x64
+            platform: Windows
+          - os: ubuntu-latest
+            rid: linux-x64
+            platform: Linux
+          - os: macos-latest
+            rid: osx-x64
+            platform: macOS
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet_version }}
+
+    - name: Install Velopack CLI
+      run: dotnet tool update -g vpk
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.*.props') }}
+        restore-keys: |
+          nuget-${{ runner.os }}-
+
+    - name: Select icon path
+      id: icon
+      shell: bash
+      run: |
+        case "${{ matrix.platform }}" in
+          Windows) echo "path=${{ inputs.icon_windows }}" >> $GITHUB_OUTPUT ;;
+          Linux) echo "path=${{ inputs.icon_linux }}" >> $GITHUB_OUTPUT ;;
+          macOS) echo "path=${{ inputs.icon_macos }}" >> $GITHUB_OUTPUT ;;
+        esac
+
+    # ====================
+    # WINDOWS SIGNING SETUP
+    # ====================
+    - name: Create Azure Trusted Signing Metadata
+      if: matrix.os == 'windows-latest' && inputs.enable_signing
+      run: |
+        $metadata = @{
+          Endpoint = "${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}"
+          CodeSigningAccountName = "${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}"
+          CertificateProfileName = "${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}"
+        }
+        $metadata | ConvertTo-Json | Out-File -FilePath azure-signing-metadata.json -Encoding utf8
+      shell: pwsh
+
+    - name: Azure login
+      if: matrix.os == 'windows-latest' && inputs.enable_signing
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        allow-no-subscriptions: true
+
+    # ====================
+    # MACOS SIGNING SETUP
+    # ====================
+    - name: Install Apple certificates and notary profile
+      if: matrix.os == 'macos-latest' && inputs.enable_signing
+      env:
+        BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+        INSTALLER_CERTIFICATE_BASE64: ${{ secrets.INSTALLER_CERTIFICATE_BASE64 }}
+        P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        APPLE_ID: ${{ secrets.APPLE_USERNAME_ID }}
+        APPLE_PASSWORD: ${{ secrets.APPLE_APP_ID_PASSWORD }}
+        APPLE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      run: |
+        CERT_BUILD_PATH=$RUNNER_TEMP/build_certificate.p12
+        CERT_INSTALLER_PATH=$RUNNER_TEMP/installer_certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+        echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERT_BUILD_PATH
+        echo -n "$INSTALLER_CERTIFICATE_BASE64" | base64 --decode -o $CERT_INSTALLER_PATH
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+        security import $CERT_BUILD_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security import $CERT_INSTALLER_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security list-keychain -d user -s $KEYCHAIN_PATH
+
+        xcrun notarytool store-credentials --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM" --password "$APPLE_PASSWORD" --keychain $KEYCHAIN_PATH velopack-profile
+
+    # ====================
+    # BUILD AND PACKAGE
+    # ====================
+    - name: Publish
+      run: dotnet publish "${{ inputs.project_path }}" -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=false -o publish/${{ matrix.rid }}
+
+    - name: Create Velopack Release (Windows signed)
+      if: matrix.os == 'windows-latest' && inputs.enable_signing
+      run: vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --azureTrustedSignFile azure-signing-metadata.json --icon "${{ steps.icon.outputs.path }}"
+
+    - name: Create Velopack Release (Windows unsigned)
+      if: matrix.os == 'windows-latest' && !inputs.enable_signing
+      run: vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
+
+    - name: Create Velopack Release (macOS/Linux)
+      if: matrix.os != 'windows-latest'
+      run: vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
+
+    # ====================
+    # MACOS CODE SIGNING AND NOTARIZATION
+    # ====================
+    - name: Sign macOS App
+      if: matrix.os == 'macos-latest' && inputs.enable_signing
+      uses: mythetech/workflows/actions/macos-sign@main
+      with:
+        app_name: ${{ inputs.app_name }}
+        platform_release_dir: releases/${{ matrix.platform }}
+        entitlements_path: ${{ inputs.entitlements_path }}
+        sign_app_identity: ${{ secrets.MACOS_SIGN_APP_IDENTITY }}
+        sign_install_identity: ${{ secrets.MACOS_SIGN_INSTALL_IDENTITY }}
+        keychain_path: ${{ runner.temp }}/app-signing.keychain-db
+
+    - name: Clean up keychain
+      if: matrix.os == 'macos-latest' && inputs.enable_signing && always()
+      run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
+
+    # ====================
+    # UPLOAD TO BLOB STORAGE
+    # ====================
+    - name: Upload to Azure Blob Storage
+      if: inputs.enable_blob_upload
+      uses: mythetech/workflows/actions/blob-upload@main
+      with:
+        app_name: ${{ inputs.app_name }}
+        version: ${{ needs.test.outputs.version }}
+        platform: ${{ matrix.platform }}
+        release_dir: releases/${{ matrix.platform }}
+        storage_account: ${{ inputs.storage_account }}
+        storage_container: ${{ inputs.storage_container }}
+        releases_container: ${{ inputs.releases_container }}
+        sas_token: ${{ secrets.BLOB_SAS_TOKEN }}
+
+    - name: Upload Release Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
+        path: releases/${{ matrix.platform }}
+
+  # ====================
+  # SMOKE TESTS
+  # ====================
+  smoke-test:
+    needs: [publish, test]
+    if: ${{ inputs.enable_smoke_tests }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows
+          - os: macos-latest
+            platform: macOS
+          - os: ubuntu-latest
+            platform: Linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    steps:
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
+        path: releases/
+
+    - name: List Downloaded Files
+      run: |
+        echo "Downloaded artifacts:"
+        ls -la releases/ || dir releases/
+      shell: bash
+
+    - name: Checkout workflows for composite actions
+      uses: actions/checkout@v4
+      with:
+        repository: mythetech/workflows
+        path: .workflows
+
+    - name: Run Smoke Test
+      uses: ./.workflows/actions/smoke-test
+      with:
+        app_name: ${{ inputs.app_name }}
+        platform: ${{ matrix.platform }}
+        releases_dir: releases
+
+    - name: Upload Failure Artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: smoke-test-failure-${{ matrix.platform }}
+        path: screenshot-failure.png

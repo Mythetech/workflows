@@ -1,0 +1,59 @@
+# Reusable workflow for running tests on pull requests
+#
+# Usage in calling repository:
+#
+# name: PR Tests
+# on:
+#   pull_request:
+#     branches: [ "main" ]
+#
+# jobs:
+#   test:
+#     uses: mythetech/workflows/.github/workflows/pr-test.yml@main
+#     with:
+#       test_project: "MyApp.Test/MyApp.Test.csproj"
+
+name: PR Test
+
+on:
+  workflow_call:
+    inputs:
+      dotnet_version:
+        description: '.NET SDK version to use'
+        type: string
+        default: '10.0.x'
+      test_project:
+        description: 'Path to the test project (e.g., MyApp.Test/MyApp.Test.csproj). If not specified, runs "dotnet test" in root.'
+        type: string
+        required: false
+      test_command:
+        description: 'Override the test command entirely (e.g., "dotnet test --filter Category=Unit")'
+        type: string
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install .NET Core
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet_version }}
+
+    - name: Execute unit tests
+      run: |
+        if [ -n "${{ inputs.test_command }}" ]; then
+          ${{ inputs.test_command }}
+        elif [ -n "${{ inputs.test_project }}" ]; then
+          dotnet test "${{ inputs.test_project }}"
+        else
+          dotnet test
+        fi
+      shell: bash
+      env:
+        Configuration: Release

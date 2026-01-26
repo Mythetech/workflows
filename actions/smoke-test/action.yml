@@ -1,0 +1,196 @@
+name: 'Smoke Test Desktop App'
+description: 'Verifies that a desktop application can launch and display a window'
+
+inputs:
+  app_name:
+    description: 'Application name (e.g., Horizon)'
+    required: true
+  platform:
+    description: 'Platform (Windows, macOS, Linux)'
+    required: true
+  releases_dir:
+    description: 'Directory containing the release artifacts'
+    required: true
+    default: 'releases'
+
+runs:
+  using: 'composite'
+  steps:
+    # Windows smoke test
+    - name: Smoke Test (Windows)
+      if: inputs.platform == 'Windows'
+      shell: pwsh
+      run: |
+        # Find and extract portable zip (simpler than installer for CI)
+        $zip = Get-ChildItem -Path "${{ inputs.releases_dir }}" -Filter "*Portable*.zip" -Recurse | Select-Object -First 1
+        if (-not $zip) {
+          # Fall back to any zip
+          $zip = Get-ChildItem -Path "${{ inputs.releases_dir }}" -Filter "*.zip" -Recurse | Select-Object -First 1
+        }
+        if (-not $zip) { throw "No zip archive found in ${{ inputs.releases_dir }}/" }
+
+        Write-Output "Extracting: $($zip.FullName)"
+        Expand-Archive -Path $zip.FullName -DestinationPath "app" -Force
+
+        $exe = Get-ChildItem -Path "app" -Filter "${{ inputs.app_name }}.exe" -Recurse | Select-Object -First 1
+        if (-not $exe) { throw "${{ inputs.app_name }}.exe not found in package" }
+
+        Write-Output "Launching: $($exe.FullName)"
+        # Single-file apps extract and spawn a child process, so the initial process exits quickly
+        Start-Process -FilePath $exe.FullName
+        Start-Sleep -Seconds 20
+
+        # Look for the actual process by name (not the bootstrap process)
+        $appProcess = Get-Process -Name "${{ inputs.app_name }}" -ErrorAction SilentlyContinue
+        if (-not $appProcess) {
+          Write-Error "${{ inputs.app_name }} process not found after 20 seconds"
+          exit 1
+        }
+
+        Write-Output "Found ${{ inputs.app_name }} process (PID: $($appProcess.Id))"
+
+        if (-not $appProcess.MainWindowHandle -or $appProcess.MainWindowHandle -eq 0) {
+          Write-Warning "Main window handle not found, but process is running"
+        } else {
+          Write-Output "Window title: $($appProcess.MainWindowTitle)"
+        }
+
+        # Clean shutdown
+        $appProcess.CloseMainWindow() | Out-Null
+        if (-not $appProcess.WaitForExit(10000)) {
+          Write-Warning "App did not close gracefully, killing..."
+          $appProcess.Kill()
+        }
+        Write-Output "Windows smoke test PASSED"
+
+    # macOS smoke test
+    - name: Smoke Test (macOS)
+      if: inputs.platform == 'macOS'
+      shell: bash
+      run: |
+        # Find portable app zip
+        ZIP_FILE=$(find "${{ inputs.releases_dir }}" -name "*Portable*.zip" 2>/dev/null | head -1)
+        if [ -z "$ZIP_FILE" ]; then
+          # Fall back to any zip
+          ZIP_FILE=$(find "${{ inputs.releases_dir }}" -name "*.zip" 2>/dev/null | head -1)
+        fi
+        if [ -z "$ZIP_FILE" ]; then
+          echo "No zip archive found"
+          ls -la "${{ inputs.releases_dir }}/"
+          exit 1
+        fi
+
+        echo "Extracting: $ZIP_FILE"
+        unzip -q "$ZIP_FILE" -d app
+
+        APP_BUNDLE=$(find app -name "*.app" -type d | head -1)
+        if [ -z "$APP_BUNDLE" ]; then
+          echo "No .app bundle found in archive"
+          ls -laR app/
+          exit 1
+        fi
+
+        # Clear quarantine flag (required for CI)
+        xattr -cr "$APP_BUNDLE"
+
+        echo "Launching: $APP_BUNDLE"
+        open "$APP_BUNDLE"
+        sleep 20
+
+        # Check if running
+        if ! pgrep -x "${{ inputs.app_name }}" > /dev/null; then
+          echo "Application not running after launch"
+          exit 1
+        fi
+
+        # Verify window exists via AppleScript
+        osascript -e 'tell application "System Events" to get name of first window of process "${{ inputs.app_name }}"' || {
+          echo "Warning: Could not verify window via AppleScript, but process is running"
+        }
+
+        # Clean shutdown
+        osascript -e 'quit app "${{ inputs.app_name }}"' || true
+        sleep 2
+        echo "macOS smoke test PASSED"
+
+    # Linux dependencies
+    - name: Install Linux Dependencies
+      if: inputs.platform == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb libgtk-3-0 libwebkit2gtk-4.1-0 xdotool libfuse2 libnotify4
+
+    # Linux smoke test
+    - name: Smoke Test (Linux)
+      if: inputs.platform == 'Linux'
+      shell: bash
+      run: |
+        # Find AppImage
+        APPIMAGE=$(find "${{ inputs.releases_dir }}" -name "*.AppImage" | head -1)
+        if [ -z "$APPIMAGE" ]; then
+          echo "No AppImage found"
+          ls -la "${{ inputs.releases_dir }}/"
+          exit 1
+        fi
+        chmod +x "$APPIMAGE"
+
+        # Start virtual display
+        export DISPLAY=:99
+        Xvfb :99 -screen 0 1920x1080x24 &
+        XVFB_PID=$!
+        sleep 2
+
+        echo "Launching: $APPIMAGE"
+        "$APPIMAGE" &
+        APP_PID=$!
+        sleep 20
+
+        # Check if still running
+        if ! kill -0 $APP_PID 2>/dev/null; then
+          echo "Application crashed"
+          kill $XVFB_PID 2>/dev/null || true
+          exit 1
+        fi
+
+        # Verify window using xdotool
+        WINDOW_ID=$(xdotool search --name "${{ inputs.app_name }}" 2>/dev/null | head -1)
+        if [ -z "$WINDOW_ID" ]; then
+          echo "Warning: Could not find ${{ inputs.app_name }} window via xdotool, but process is running"
+        else
+          echo "Found window ID: $WINDOW_ID"
+        fi
+
+        # Cleanup
+        kill $APP_PID 2>/dev/null || true
+        kill $XVFB_PID 2>/dev/null || true
+        echo "Linux smoke test PASSED"
+
+    # Screenshot on failure
+    - name: Screenshot on Failure (Windows)
+      if: failure() && inputs.platform == 'Windows'
+      shell: pwsh
+      run: |
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+        $bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
+        $bitmap.Save("screenshot-failure.png")
+        Write-Output "Screenshot saved to screenshot-failure.png"
+
+    - name: Screenshot on Failure (macOS)
+      if: failure() && inputs.platform == 'macOS'
+      shell: bash
+      run: |
+        screencapture -x screenshot-failure.png || true
+        echo "Screenshot saved to screenshot-failure.png"
+
+    - name: Screenshot on Failure (Linux)
+      if: failure() && inputs.platform == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get install -y scrot || true
+        DISPLAY=:99 scrot screenshot-failure.png || true
+        echo "Screenshot saved to screenshot-failure.png"

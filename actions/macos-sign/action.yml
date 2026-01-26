@@ -1,0 +1,160 @@
+name: 'macOS Sign and Notarize'
+description: 'Signs and notarizes a macOS application bundle'
+
+inputs:
+  app_name:
+    description: 'Application name (e.g., Horizon)'
+    required: true
+  platform_release_dir:
+    description: 'Directory containing the release artifacts (e.g., releases/macOS)'
+    required: true
+  entitlements_path:
+    description: 'Path to the entitlements file'
+    required: true
+  sign_app_identity:
+    description: 'macOS Developer ID Application identity'
+    required: true
+  sign_install_identity:
+    description: 'macOS Developer ID Installer identity'
+    required: true
+  keychain_path:
+    description: 'Path to the keychain containing certificates'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Extract and sign macOS app
+      shell: bash
+      run: |
+        # Extract the .app from the portable zip
+        PORTABLE_ZIP=$(find "${{ inputs.platform_release_dir }}" -name "*Portable.zip" -type f | head -n 1)
+        echo "Extracting from: $PORTABLE_ZIP"
+        mkdir -p signed_app
+        unzip -q "$PORTABLE_ZIP" -d signed_app
+
+        APP_PATH=$(find signed_app -name "*.app" -type d | head -n 1)
+        echo "Found app: $APP_PATH"
+
+        # Move all non-Mach-O files from MacOS to Resources
+        # This prevents codesign from trying to validate static files as code
+        echo "Moving non-code files to Contents/Resources..."
+        mkdir -p "$APP_PATH/Contents/Resources"
+
+        # Move directories (like wwwroot)
+        find "$APP_PATH/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d | while read dir; do
+          dirname=$(basename "$dir")
+          echo "Moving directory: $dirname"
+          mv "$dir" "$APP_PATH/Contents/Resources/"
+          ln -s "../Resources/$dirname" "$APP_PATH/Contents/MacOS/$dirname"
+        done
+
+        # Move non-Mach-O files (json, txt, xml, etc.)
+        find "$APP_PATH/Contents/MacOS" -maxdepth 1 -type f | while read file; do
+          if ! file "$file" | grep -q "Mach-O"; then
+            filename=$(basename "$file")
+            echo "Moving file: $filename"
+            mv "$file" "$APP_PATH/Contents/Resources/"
+            ln -s "../Resources/$filename" "$APP_PATH/Contents/MacOS/$filename"
+          fi
+        done
+
+        # Remove any ad-hoc signatures first
+        echo "Removing existing signatures..."
+        find "$APP_PATH" -type f | while read file; do
+          if file "$file" | grep -q "Mach-O"; then
+            codesign --remove-signature "$file" 2>/dev/null || true
+          fi
+        done
+
+        # Sign all Mach-O binaries (dylibs and executables) with hardened runtime and entitlements
+        # Sign from deepest to shallowest
+        echo "Signing all binaries with entitlements..."
+        find "$APP_PATH" -type f -name "*.dylib" | while read file; do
+          echo "Signing dylib: $file"
+          codesign -s "${{ inputs.sign_app_identity }}" \
+            -f \
+            --timestamp \
+            --options runtime \
+            --entitlements "${{ inputs.entitlements_path }}" \
+            --keychain "${{ inputs.keychain_path }}" \
+            "$file"
+        done
+
+        # Sign executables (but not the main one yet)
+        find "$APP_PATH/Contents/MacOS" -type f ! -name "${{ inputs.app_name }}" | while read file; do
+          if file "$file" | grep -q "Mach-O"; then
+            echo "Signing executable: $file"
+            codesign -s "${{ inputs.sign_app_identity }}" \
+              -f \
+              --timestamp \
+              --options runtime \
+              --entitlements "${{ inputs.entitlements_path }}" \
+              --keychain "${{ inputs.keychain_path }}" \
+              "$file"
+          fi
+        done
+
+        # Sign the main executable
+        echo "Signing main executable..."
+        codesign -s "${{ inputs.sign_app_identity }}" \
+          -f \
+          --timestamp \
+          --options runtime \
+          --entitlements "${{ inputs.entitlements_path }}" \
+          --keychain "${{ inputs.keychain_path }}" \
+          "$APP_PATH/Contents/MacOS/${{ inputs.app_name }}"
+
+        # Sign the main app bundle
+        echo "Signing app bundle: $APP_PATH"
+        codesign -s "${{ inputs.sign_app_identity }}" \
+          -f \
+          --timestamp \
+          --options runtime \
+          --entitlements "${{ inputs.entitlements_path }}" \
+          --keychain "${{ inputs.keychain_path }}" \
+          "$APP_PATH"
+
+        # Verify signature
+        echo "Verifying signature..."
+        codesign -v --verbose=2 "$APP_PATH"
+
+        # Create signed pkg
+        echo "Creating signed .pkg..."
+        PKG_PATH="${{ inputs.platform_release_dir }}/${{ inputs.app_name }}-osx-Setup-signed.pkg"
+        productbuild --component "$APP_PATH" /Applications --sign "${{ inputs.sign_install_identity }}" --keychain "${{ inputs.keychain_path }}" "$PKG_PATH"
+
+        # Replace the original pkg
+        rm "${{ inputs.platform_release_dir }}/${{ inputs.app_name }}-osx-Setup.pkg"
+        mv "$PKG_PATH" "${{ inputs.platform_release_dir }}/${{ inputs.app_name }}-osx-Setup.pkg"
+
+        # Also update the portable zip with signed app
+        rm "$PORTABLE_ZIP"
+        cd signed_app && zip -r -q -y "../$PORTABLE_ZIP" . && cd ..
+
+        echo "Done signing"
+
+    - name: Notarize macOS Installer
+      shell: bash
+      run: |
+        PKG_PATH="${{ inputs.platform_release_dir }}/${{ inputs.app_name }}-osx-Setup.pkg"
+        echo "Notarizing: $PKG_PATH"
+
+        # Submit and capture the output
+        SUBMIT_OUTPUT=$(xcrun notarytool submit "$PKG_PATH" --keychain-profile "velopack-profile" --keychain "${{ inputs.keychain_path }}" --wait 2>&1) || true
+        echo "$SUBMIT_OUTPUT"
+
+        # Extract submission ID
+        SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | grep -o 'id: [a-f0-9-]*' | head -1 | cut -d' ' -f2)
+
+        # Check if notarization succeeded
+        if echo "$SUBMIT_OUTPUT" | grep -q "status: Accepted"; then
+          echo "Notarization succeeded!"
+          xcrun stapler staple "$PKG_PATH"
+        else
+          echo "Notarization failed. Fetching log..."
+          if [ -n "$SUBMISSION_ID" ]; then
+            xcrun notarytool log "$SUBMISSION_ID" --keychain-profile "velopack-profile" --keychain "${{ inputs.keychain_path }}"
+          fi
+          exit 1
+        fi
