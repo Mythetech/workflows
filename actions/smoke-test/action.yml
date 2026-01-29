@@ -32,6 +32,22 @@ runs:
         Write-Output "Extracting: $($zip.FullName)"
         Expand-Archive -Path $zip.FullName -DestinationPath "app" -Force
 
+        # List contents to diagnose missing assemblies
+        Write-Output "=== Package contents (app/current/) ==="
+        Get-ChildItem -Path "app/current" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+          Write-Output "  $($_.FullName.Replace((Get-Location).Path + '\app\current\', ''))"
+        }
+        Write-Output "=== End package contents ==="
+
+        # Check specifically for WebView2 assemblies
+        $webview2 = Get-ChildItem -Path "app" -Filter "Microsoft.Web.WebView2*.dll" -Recurse
+        if ($webview2) {
+          Write-Output "Found WebView2 assemblies:"
+          $webview2 | ForEach-Object { Write-Output "  $($_.FullName)" }
+        } else {
+          Write-Warning "WebView2 assemblies NOT found in package"
+        }
+
         $exe = Get-ChildItem -Path "app" -Filter "${{ inputs.app_name }}.exe" -Recurse | Select-Object -First 1
         if (-not $exe) { throw "${{ inputs.app_name }}.exe not found in package" }
 
