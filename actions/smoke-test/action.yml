@@ -36,8 +36,20 @@ runs:
         if (-not $exe) { throw "${{ inputs.app_name }}.exe not found in package" }
 
         Write-Output "Launching: $($exe.FullName)"
-        # Single-file apps extract and spawn a child process, so the initial process exits quickly
-        Start-Process -FilePath $exe.FullName
+
+        # Set extraction directory for single-file apps to avoid Windows Defender issues with %TEMP%
+        $extractDir = Join-Path $PWD "dotnet-extract"
+        New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+        [System.Environment]::SetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR", $extractDir, "Process")
+        Write-Output "Set DOTNET_BUNDLE_EXTRACT_BASE_DIR=$extractDir"
+
+        # Single-file apps extract and spawn a child process
+        # Use ProcessStartInfo to ensure environment variables are inherited
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe.FullName
+        $psi.UseShellExecute = $false
+        $psi.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = $extractDir
+        [System.Diagnostics.Process]::Start($psi) | Out-Null
         Start-Sleep -Seconds 20
 
         # Look for the actual process by name (not the bootstrap process)
