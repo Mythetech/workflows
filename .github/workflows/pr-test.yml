@@ -45,6 +45,12 @@ jobs:
       with:
         dotnet-version: ${{ inputs.dotnet_version }}
 
+    - name: Restore dependencies
+      run: dotnet restore
+      env:
+        GITHUB_USERNAME: ${{ github.actor }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: Execute unit tests
       run: |
         TEST_CMD="${{ inputs.test_command }}"
@@ -52,9 +58,9 @@ jobs:
         if [ -n "$TEST_CMD" ]; then
           eval "$TEST_CMD"
         elif [ -n "$TEST_PROJECT" ]; then
-          dotnet test "$TEST_PROJECT"
+          dotnet test "$TEST_PROJECT" --no-restore
         else
-          dotnet test
+          dotnet test --no-restore
         fi
       shell: bash
       env:
