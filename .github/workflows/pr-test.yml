@@ -47,10 +47,12 @@ jobs:
 
     - name: Execute unit tests
       run: |
-        if [ -n "${{ inputs.test_command }}" ]; then
-          ${{ inputs.test_command }}
-        elif [ -n "${{ inputs.test_project }}" ]; then
-          dotnet test "${{ inputs.test_project }}"
+        TEST_CMD="${{ inputs.test_command }}"
+        TEST_PROJECT="${{ inputs.test_project }}"
+        if [ -n "$TEST_CMD" ]; then
+          eval "$TEST_CMD"
+        elif [ -n "$TEST_PROJECT" ]; then
+          dotnet test "$TEST_PROJECT"
         else
           dotnet test
         fi
