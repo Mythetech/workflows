@@ -30,6 +30,18 @@ on:
         description: 'Override the test command entirely (e.g., "dotnet test --filter Category=Unit")'
         type: string
         required: false
+      enable_coverage:
+        description: 'Enable code coverage collection'
+        type: boolean
+        default: true
+      coverage_threshold:
+        description: 'Minimum coverage percentage (0-100). Set to 0 to disable threshold check.'
+        type: number
+        default: 0
+      upload_coverage_artifact:
+        description: 'Upload coverage results as workflow artifact'
+        type: boolean
+        default: true
 
 jobs:
   test:
@@ -49,13 +61,81 @@ jobs:
       run: |
         TEST_CMD="${{ inputs.test_command }}"
         TEST_PROJECT="${{ inputs.test_project }}"
+        ENABLE_COVERAGE="${{ inputs.enable_coverage }}"
+
+        # Build coverage arguments if enabled
+        COVERAGE_ARGS=""
+        if [ "$ENABLE_COVERAGE" = "true" ]; then
+          COVERAGE_ARGS='--collect:"XPlat Code Coverage" --results-directory ./TestResults -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura'
+        fi
+
         if [ -n "$TEST_CMD" ]; then
-          eval "$TEST_CMD"
+          if [ "$ENABLE_COVERAGE" = "true" ]; then
+            eval "$TEST_CMD $COVERAGE_ARGS"
+          else
+            eval "$TEST_CMD"
+          fi
         elif [ -n "$TEST_PROJECT" ]; then
-          dotnet test "$TEST_PROJECT"
+          eval "dotnet test \"$TEST_PROJECT\" --configuration Release $COVERAGE_ARGS"
         else
-          dotnet test
+          eval "dotnet test --configuration Release $COVERAGE_ARGS"
         fi
       shell: bash
       env:
         Configuration: Release
+
+    - name: Generate coverage report
+      if: inputs.enable_coverage && always()
+      run: |
+        dotnet tool install -g dotnet-reportgenerator-globaltool || true
+
+        COVERAGE_FILE=$(find ./TestResults -name "coverage.cobertura.xml" 2>/dev/null | head -1)
+
+        if [ -n "$COVERAGE_FILE" ]; then
+          echo "Found coverage file: $COVERAGE_FILE"
+
+          reportgenerator \
+            -reports:"$COVERAGE_FILE" \
+            -targetdir:./TestResults/CoverageReport \
+            -reporttypes:"MarkdownSummaryGithub;Html"
+
+          if [ -f "./TestResults/CoverageReport/SummaryGithub.md" ]; then
+            cat ./TestResults/CoverageReport/SummaryGithub.md >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "::warning::No coverage file found"
+        fi
+      shell: bash
+
+    - name: Check coverage threshold
+      if: inputs.enable_coverage && inputs.coverage_threshold > 0
+      run: |
+        THRESHOLD=${{ inputs.coverage_threshold }}
+        COVERAGE_FILE=$(find ./TestResults -name "coverage.cobertura.xml" 2>/dev/null | head -1)
+
+        if [ -n "$COVERAGE_FILE" ]; then
+          LINE_COVERAGE=$(grep -oP 'line-rate="\K[^"]+' "$COVERAGE_FILE" | head -1)
+          COVERAGE_PCT=$(echo "scale=2; $LINE_COVERAGE * 100" | bc)
+
+          echo "Coverage: ${COVERAGE_PCT}%, Threshold: ${THRESHOLD}%"
+
+          if (( $(echo "$COVERAGE_PCT < $THRESHOLD" | bc -l) )); then
+            echo "::error::Coverage ${COVERAGE_PCT}% is below threshold ${THRESHOLD}%"
+            exit 1
+          else
+            echo "::notice::Coverage ${COVERAGE_PCT}% meets threshold ${THRESHOLD}%"
+          fi
+        else
+          echo "::warning::No coverage file found, skipping threshold check"
+        fi
+      shell: bash
+
+    - name: Upload coverage artifact
+      if: inputs.enable_coverage && inputs.upload_coverage_artifact && always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: |
+          ./TestResults/**/coverage.cobertura.xml
+          ./TestResults/CoverageReport/
+        retention-days: 14
