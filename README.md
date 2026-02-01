@@ -28,6 +28,42 @@ jobs:
 | `dotnet_version` | No | `10.0.x` | .NET SDK version |
 | `test_project` | No | - | Path to test project. If omitted, runs `dotnet test` in root |
 | `test_command` | No | - | Override the entire test command |
+| `enable_coverage` | No | `true` | Enable code coverage collection |
+| `coverage_threshold` | No | `0` | Minimum coverage % (0 disables threshold check) |
+| `upload_coverage_artifact` | No | `true` | Upload coverage results as artifact |
+
+#### Code Coverage
+
+Coverage is enabled by default. Results appear in:
+- **GitHub Job Summary** - Markdown table with coverage breakdown
+- **Artifact** - Downloadable HTML report (`coverage-report`)
+
+To enforce a minimum coverage threshold:
+
+```yaml
+uses: mythetech/workflows/.github/workflows/pr-test.yml@main
+with:
+  test_project: "MyApp.Test/MyApp.Test.csproj"
+  coverage_threshold: 80  # Fail if coverage < 80%
+```
+
+To disable coverage:
+
+```yaml
+uses: mythetech/workflows/.github/workflows/pr-test.yml@main
+with:
+  test_project: "MyApp.Test/MyApp.Test.csproj"
+  enable_coverage: false
+```
+
+**Prerequisite**: Test projects should include the Coverlet collector package:
+
+```xml
+<PackageReference Include="coverlet.collector" Version="6.0.4">
+  <PrivateAssets>all</PrivateAssets>
+  <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+</PackageReference>
+```
 
 ---
 
