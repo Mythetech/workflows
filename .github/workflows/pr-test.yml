@@ -66,7 +66,14 @@ jobs:
         # Build coverage arguments if enabled
         COVERAGE_ARGS=""
         if [ "$ENABLE_COVERAGE" = "true" ]; then
-          COVERAGE_ARGS='--collect:"XPlat Code Coverage" --results-directory ./TestResults -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura'
+          # Check for a .runsettings file in any .Test directory
+          RUNSETTINGS_FILE=$(find . -name "*.runsettings" -path "*.Test/*" 2>/dev/null | head -1)
+          if [ -n "$RUNSETTINGS_FILE" ]; then
+            echo "Using runsettings file: $RUNSETTINGS_FILE"
+            COVERAGE_ARGS="--settings \"$RUNSETTINGS_FILE\" --collect:\"XPlat Code Coverage\" --results-directory ./TestResults"
+          else
+            COVERAGE_ARGS='--collect:"XPlat Code Coverage" --results-directory ./TestResults -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura'
+          fi
         fi
 
         if [ -n "$TEST_CMD" ]; then
