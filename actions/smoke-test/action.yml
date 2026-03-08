@@ -66,12 +66,23 @@ runs:
         $psi.UseShellExecute = $false
         $psi.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = $extractDir
         [System.Diagnostics.Process]::Start($psi) | Out-Null
-        Start-Sleep -Seconds 20
 
-        # Look for the actual process by name (not the bootstrap process)
-        $appProcess = Get-Process -Name "${{ inputs.app_name }}" -ErrorAction SilentlyContinue
+        # Poll for the process to appear (single-file extraction + startup can be slow on CI)
+        $maxWait = 60
+        $elapsed = 0
+        $appProcess = $null
+        while ($elapsed -lt $maxWait) {
+          Start-Sleep -Seconds 5
+          $elapsed += 5
+          $appProcess = Get-Process -Name "${{ inputs.app_name }}" -ErrorAction SilentlyContinue
+          if ($appProcess) {
+            Write-Output "${{ inputs.app_name }} process found after $elapsed seconds"
+            break
+          }
+          Write-Output "Waiting for ${{ inputs.app_name }} process... ($elapsed/$maxWait seconds)"
+        }
         if (-not $appProcess) {
-          Write-Error "${{ inputs.app_name }} process not found after 20 seconds"
+          Write-Error "${{ inputs.app_name }} process not found after $maxWait seconds"
           exit 1
         }
 
@@ -123,11 +134,21 @@ runs:
 
         echo "Launching: $APP_BUNDLE"
         open "$APP_BUNDLE"
-        sleep 20
 
-        # Check if running
+        # Poll for the process to appear
+        MAX_WAIT=60
+        ELAPSED=0
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          sleep 5
+          ELAPSED=$((ELAPSED + 5))
+          if pgrep -x "${{ inputs.app_name }}" > /dev/null; then
+            echo "${{ inputs.app_name }} process found after $ELAPSED seconds"
+            break
+          fi
+          echo "Waiting for ${{ inputs.app_name }} process... ($ELAPSED/$MAX_WAIT seconds)"
+        done
         if ! pgrep -x "${{ inputs.app_name }}" > /dev/null; then
-          echo "Application not running after launch"
+          echo "Application not running after $MAX_WAIT seconds"
           exit 1
         fi
 
