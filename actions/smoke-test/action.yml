@@ -64,8 +64,11 @@ runs:
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $exe.FullName
         $psi.UseShellExecute = $false
+        $psi.RedirectStandardError = $true
+        $psi.RedirectStandardOutput = $true
         $psi.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = $extractDir
-        [System.Diagnostics.Process]::Start($psi) | Out-Null
+        $launchedProcess = [System.Diagnostics.Process]::Start($psi)
+        Write-Output "Launched process PID: $($launchedProcess.Id)"
 
         # Poll for the process to appear (single-file extraction + startup can be slow on CI)
         $maxWait = 60
@@ -74,6 +77,16 @@ runs:
         while ($elapsed -lt $maxWait) {
           Start-Sleep -Seconds 5
           $elapsed += 5
+
+          # Check if the launcher process crashed before the app started
+          if ($launchedProcess.HasExited -and -not $appProcess) {
+            Write-Warning "Launched process exited with code $($launchedProcess.ExitCode)"
+            $stderr = $launchedProcess.StandardError.ReadToEnd()
+            $stdout = $launchedProcess.StandardOutput.ReadToEnd()
+            if ($stderr) { Write-Output "=== STDERR ===$([Environment]::NewLine)$stderr" }
+            if ($stdout) { Write-Output "=== STDOUT ===$([Environment]::NewLine)$stdout" }
+          }
+
           $appProcess = Get-Process -Name "${{ inputs.app_name }}" -ErrorAction SilentlyContinue
           if ($appProcess) {
             Write-Output "${{ inputs.app_name }} process found after $elapsed seconds"
@@ -82,6 +95,12 @@ runs:
           Write-Output "Waiting for ${{ inputs.app_name }} process... ($elapsed/$maxWait seconds)"
         }
         if (-not $appProcess) {
+          Write-Output "=== Running processes ==="
+          Get-Process | Where-Object { $_.MainWindowTitle -or $_.ProcessName -match 'dotnet|siren|${{ inputs.app_name }}' } |
+            Format-Table ProcessName, Id, MainWindowTitle -AutoSize | Out-String | Write-Output
+          Write-Output "=== All dotnet-related processes ==="
+          Get-Process | Where-Object { $_.Path -and $_.Path -like "*app*" } |
+            Format-Table ProcessName, Id, Path -AutoSize | Out-String | Write-Output
           Write-Error "${{ inputs.app_name }} process not found after $maxWait seconds"
           exit 1
         }
