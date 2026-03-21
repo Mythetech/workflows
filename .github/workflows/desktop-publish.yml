@@ -330,6 +330,7 @@ jobs:
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         path: releases/${{ matrix.platform }}
+        retention-days: 14
 
   # ====================
   # SMOKE TESTS
@@ -382,3 +383,4 @@ jobs:
       with:
         name: smoke-test-failure-${{ matrix.platform }}
         path: screenshot-failure.png
+        retention-days: 14
