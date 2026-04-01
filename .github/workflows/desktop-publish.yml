@@ -349,7 +349,7 @@ jobs:
           - os: ubuntu-latest
             platform: Linux
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 3
 
     steps:
     - name: Download Build Artifacts
