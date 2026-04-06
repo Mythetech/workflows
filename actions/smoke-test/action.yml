@@ -48,7 +48,11 @@ runs:
           Write-Warning "WebView2 assemblies NOT found in package"
         }
 
-        $exe = Get-ChildItem -Path "app" -Filter "${{ inputs.app_name }}.exe" -Recurse | Select-Object -First 1
+        # Prefer the real app in current/ (Velopack packages have a launcher stub at root)
+        $exe = Get-ChildItem -Path "app/current" -Filter "${{ inputs.app_name }}.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $exe) {
+          $exe = Get-ChildItem -Path "app" -Filter "${{ inputs.app_name }}.exe" -Recurse | Select-Object -First 1
+        }
         if (-not $exe) { throw "${{ inputs.app_name }}.exe not found in package" }
 
         Write-Output "Launching: $($exe.FullName)"
@@ -59,7 +63,6 @@ runs:
         [System.Environment]::SetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR", $extractDir, "Process")
         Write-Output "Set DOTNET_BUNDLE_EXTRACT_BASE_DIR=$extractDir"
 
-        # Single-file apps extract and spawn a child process
         # Use ProcessStartInfo to ensure environment variables are inherited
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $exe.FullName
@@ -67,10 +70,11 @@ runs:
         $psi.RedirectStandardError = $true
         $psi.RedirectStandardOutput = $true
         $psi.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = $extractDir
+        $psi.Environment["HERMES_SMOKE_TEST"] = "1"
         $launchedProcess = [System.Diagnostics.Process]::Start($psi)
         Write-Output "Launched process PID: $($launchedProcess.Id)"
 
-        # Poll for the process to appear (single-file extraction + startup can be slow on CI)
+        # Poll for the process to appear (startup can be slow on CI)
         $maxWait = 60
         $elapsed = 0
         $appProcess = $null
@@ -78,13 +82,15 @@ runs:
           Start-Sleep -Seconds 5
           $elapsed += 5
 
-          # Check if the launcher process crashed before the app started
+          # Check if the launched process crashed or exited early
           if ($launchedProcess.HasExited -and -not $appProcess) {
             Write-Warning "Launched process exited with code $($launchedProcess.ExitCode)"
             $stderr = $launchedProcess.StandardError.ReadToEnd()
             $stdout = $launchedProcess.StandardOutput.ReadToEnd()
             if ($stderr) { Write-Output "=== STDERR ===$([Environment]::NewLine)$stderr" }
             if ($stdout) { Write-Output "=== STDOUT ===$([Environment]::NewLine)$stdout" }
+            Write-Error "${{ inputs.app_name }} process exited unexpectedly with code $($launchedProcess.ExitCode)"
+            exit 1
           }
 
           $appProcess = Get-Process -Name "${{ inputs.app_name }}" -ErrorAction SilentlyContinue
