@@ -177,6 +177,9 @@ runs:
           exit 1
         fi
 
+        # Give the window time to fully render before checking via AppleScript
+        sleep 10
+
         # Verify window exists via AppleScript
         osascript -e 'tell application "System Events" to get name of first window of process "${{ inputs.app_name }}"' || {
           echo "Warning: Could not verify window via AppleScript, but process is running"
