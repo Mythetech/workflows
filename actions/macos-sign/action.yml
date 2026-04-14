@@ -95,7 +95,7 @@ runs:
         done
 
         # Sign executables (but not the main one yet)
-        find "$APP_PATH/Contents/MacOS" -type f ! -name "${{ inputs.app_name }}" | while read file; do
+        find "$APP_PATH/Contents/MacOS" -type f ! -name "${{ inputs.app_name }}" ! -name "libdbgshim.dylib" | while read file; do
           if file "$file" | grep -q "Mach-O"; then
             echo "Signing executable: $file"
             codesign -s "${{ inputs.sign_app_identity }}" \
