@@ -71,14 +71,27 @@ runs:
         # Sign from deepest to shallowest
         echo "Signing all binaries with entitlements..."
         find "$APP_PATH" -type f -name "*.dylib" | while read file; do
-          echo "Signing dylib: $file"
-          codesign -s "${{ inputs.sign_app_identity }}" \
-            -f \
-            --timestamp \
-            --options runtime \
-            --entitlements "${{ inputs.entitlements_path }}" \
-            --keychain "${{ inputs.keychain_path }}" \
-            "$file"
+          filename=$(basename "$file")
+          # dbgshim must NOT be signed with hardened runtime — it needs to
+          # dlopen mscordbi from the system .NET runtime directory at debug time.
+          # Hardened runtime restricts dlopen to the app bundle, breaking the debugger.
+          if [ "$filename" = "libdbgshim.dylib" ]; then
+            echo "Signing dylib (without hardened runtime): $file"
+            codesign -s "${{ inputs.sign_app_identity }}" \
+              -f \
+              --timestamp \
+              --keychain "${{ inputs.keychain_path }}" \
+              "$file"
+          else
+            echo "Signing dylib: $file"
+            codesign -s "${{ inputs.sign_app_identity }}" \
+              -f \
+              --timestamp \
+              --options runtime \
+              --entitlements "${{ inputs.entitlements_path }}" \
+              --keychain "${{ inputs.keychain_path }}" \
+              "$file"
+          fi
         done
 
         # Sign executables (but not the main one yet)
