@@ -330,7 +330,7 @@ jobs:
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         path: releases/${{ matrix.platform }}
-        retention-days: 14
+        retention-days: 3
 
   # ====================
   # SMOKE TESTS
@@ -376,6 +376,13 @@ jobs:
         app_name: ${{ inputs.app_name }}
         platform: ${{ matrix.platform }}
         releases_dir: releases
+
+    - name: Delete publish artifact (on success)
+      if: success()
+      uses: geekyeggo/delete-artifact@v6
+      with:
+        name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
+        failOnError: false
 
     - name: Upload Failure Artifacts
       if: failure()
