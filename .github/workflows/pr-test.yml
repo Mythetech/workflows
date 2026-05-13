@@ -145,4 +145,4 @@ jobs:
         path: |
           ./TestResults/**/coverage.cobertura.xml
           ./TestResults/CoverageReport/
-        retention-days: 14
+        retention-days: 3
