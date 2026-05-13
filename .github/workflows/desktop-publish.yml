@@ -129,12 +129,12 @@ jobs:
       version: ${{ steps.get_version.outputs.VERSION }}
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         fetch-depth: 0
 
     - name: Install .NET Core
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
       with:
         dotnet-version: ${{ inputs.dotnet_version }}
 
@@ -192,12 +192,12 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         fetch-depth: 0
 
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
       with:
         dotnet-version: ${{ inputs.dotnet_version }}
 
@@ -205,7 +205,7 @@ jobs:
       run: dotnet tool update -g vpk
 
     - name: Cache NuGet packages
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ~/.nuget/packages
         key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.*.props') }}
@@ -238,7 +238,7 @@ jobs:
 
     - name: Azure login
       if: matrix.os == 'windows-latest' && inputs.enable_signing
-      uses: azure/login@v2
+      uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
         allow-no-subscriptions: true
@@ -297,7 +297,7 @@ jobs:
     # ====================
     - name: Sign macOS App
       if: matrix.os == 'macos-latest' && inputs.enable_signing
-      uses: mythetech/workflows/actions/macos-sign@main
+      uses: mythetech/workflows/actions/macos-sign@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
       with:
         app_name: ${{ inputs.app_name }}
         platform_release_dir: releases/${{ matrix.platform }}
@@ -315,7 +315,7 @@ jobs:
     # ====================
     - name: Upload to Azure Blob Storage
       if: inputs.enable_blob_upload
-      uses: mythetech/workflows/actions/blob-upload@main
+      uses: mythetech/workflows/actions/blob-upload@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
       with:
         app_name: ${{ inputs.app_name }}
         version: ${{ needs.test.outputs.version }}
@@ -327,7 +327,7 @@ jobs:
         sas_token: ${{ secrets.BLOB_SAS_TOKEN }}
 
     - name: Upload Release Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         path: releases/${{ matrix.platform }}
@@ -354,7 +354,7 @@ jobs:
 
     steps:
     - name: Download Build Artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         path: releases/
@@ -366,9 +366,10 @@ jobs:
       shell: bash
 
     - name: Checkout workflows for composite actions
-      uses: actions/checkout@v4
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         repository: mythetech/workflows
+        ref: f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
         path: .workflows
 
     - name: Run Smoke Test
@@ -380,14 +381,14 @@ jobs:
 
     - name: Delete publish artifact (on success)
       if: success()
-      uses: geekyeggo/delete-artifact@v6
+      uses: geekyeggo/delete-artifact@176a747ab7e287e3ff4787bf8a148716375ca118 # v6
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         failOnError: false
 
     - name: Upload Failure Artifacts
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: smoke-test-failure-${{ matrix.platform }}
         path: screenshot-failure.png
