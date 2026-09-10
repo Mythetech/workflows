@@ -23,6 +23,9 @@
 #       storage_account: "stmythetechglobal"
 #       storage_container: "preview"
 #     secrets: inherit
+#
+# To pin the SDK from the repository's own global.json instead of dotnet_version:
+#       global_json_file: "global.json"
 
 name: Desktop Publish
 
@@ -58,9 +61,13 @@ on:
         type: string
         required: true
       dotnet_version:
-        description: '.NET SDK version to use'
+        description: '.NET SDK version to use. Ignored when global_json_file is set.'
         type: string
         default: '10.0.x'
+      global_json_file:
+        description: 'Path to a global.json pinning the SDK. When set, takes precedence over dotnet_version.'
+        type: string
+        default: ''
       versioning:
         description: 'Versioning strategy: "nbgv" (Nerdbank.GitVersioning) or "run_number" (0.0.$RUN_NUMBER)'
         type: string
@@ -133,7 +140,14 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Install .NET Core (from global.json)
+      if: inputs.global_json_file != ''
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      with:
+        global-json-file: ${{ inputs.global_json_file }}
+
     - name: Install .NET Core
+      if: inputs.global_json_file == ''
       uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
       with:
         dotnet-version: ${{ inputs.dotnet_version }}
@@ -196,7 +210,14 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Setup .NET (from global.json)
+      if: inputs.global_json_file != ''
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      with:
+        global-json-file: ${{ inputs.global_json_file }}
+
     - name: Setup .NET
+      if: inputs.global_json_file == ''
       uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
       with:
         dotnet-version: ${{ inputs.dotnet_version }}
