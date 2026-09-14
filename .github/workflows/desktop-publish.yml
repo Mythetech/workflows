@@ -309,23 +309,106 @@ jobs:
       if: matrix.os == 'windows-latest' && !inputs.enable_signing
       run: vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
 
-    - name: Create Velopack Release (macOS/Linux)
-      if: matrix.os != 'windows-latest'
+    - name: Create Velopack Release (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
+
+    - name: Create Velopack Release (macOS unsigned)
+      if: matrix.os == 'macos-latest' && !inputs.enable_signing
       run: vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
 
     # ====================
-    # MACOS CODE SIGNING AND NOTARIZATION
+    # MACOS BUNDLE, SIGN, NOTARIZE
     # ====================
-    - name: Sign macOS App
+    # Signing has to happen BEFORE `vpk pack`, because pack is what produces the .nupkg the
+    # auto-updater downloads. Signing the packed output afterwards only reaches the .pkg and the
+    # portable .zip, so every in-app update used to overwrite the Developer ID signature with the
+    # ad-hoc one dotnet publish leaves behind: no notarization, no hardened runtime, no entitlements,
+    # and a new code identity each build. That last part also resets the user's keychain
+    # "Always Allow" grants, since a keychain ACL trusts an app by its designated requirement, which
+    # for ad-hoc code is just that build's cdhash.
+    - name: Bundle macOS app
       if: matrix.os == 'macos-latest' && inputs.enable_signing
-      uses: mythetech/workflows/actions/macos-sign@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
-      with:
-        app_name: ${{ inputs.app_name }}
-        platform_release_dir: releases/${{ matrix.platform }}
-        entitlements_path: ${{ inputs.entitlements_path }}
-        sign_app_identity: ${{ secrets.MACOS_SIGN_APP_IDENTITY }}
-        sign_install_identity: ${{ secrets.MACOS_SIGN_INSTALL_IDENTITY }}
-        keychain_path: ${{ runner.temp }}/app-signing.keychain-db
+      run: vpk bundle -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} -o bundle -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
+
+    - name: Restructure and pre-sign macOS binaries
+      if: matrix.os == 'macos-latest' && inputs.enable_signing
+      shell: bash
+      env:
+        APP_PATH: bundle/${{ inputs.app_name }}.app
+        APP_NAME: ${{ inputs.app_name }}
+        ENTITLEMENTS: ${{ inputs.entitlements_path }}
+        SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_APP_IDENTITY }}
+        KEYCHAIN_PATH: ${{ runner.temp }}/app-signing.keychain-db
+      run: |
+        set -euo pipefail
+
+        # codesign seals a plain file in Contents/MacOS with an extended attribute, and xattrs do not
+        # survive the .nupkg round trip the updater uses. Move everything that is not a Mach-O image
+        # into Contents/Resources and symlink it back; symlinks need no signature of their own.
+        echo "Moving non-code files out of Contents/MacOS..."
+        mkdir -p "$APP_PATH/Contents/Resources"
+
+        while IFS= read -r -d '' dir; do
+          name=$(basename "$dir")
+          echo "  directory: $name"
+          mv "$dir" "$APP_PATH/Contents/Resources/"
+          ln -s "../Resources/$name" "$APP_PATH/Contents/MacOS/$name"
+        done < <(find "$APP_PATH/Contents/MacOS" -mindepth 1 -maxdepth 1 -type d -print0)
+
+        while IFS= read -r -d '' file; do
+          if ! file "$file" | grep -q "Mach-O"; then
+            name=$(basename "$file")
+            echo "  file: $name"
+            mv "$file" "$APP_PATH/Contents/Resources/"
+            ln -s "../Resources/$name" "$APP_PATH/Contents/MacOS/$name"
+          fi
+        done < <(find "$APP_PATH/Contents/MacOS" -maxdepth 1 -type f -print0)
+
+        # Collect every Mach-O image left in the bundle, wherever it now lives.
+        MACHO_LIST=$(mktemp)
+        while IFS= read -r -d '' file; do
+          if file "$file" | grep -q "Mach-O"; then
+            printf '%s\n' "$file" >> "$MACHO_LIST"
+          fi
+        done < <(find "$APP_PATH" -type f -print0)
+
+        echo "Removing dotnet's ad-hoc signatures..."
+        while IFS= read -r file; do
+          codesign --remove-signature "$file" 2>/dev/null || true
+        done < "$MACHO_LIST"
+
+        # Pre-sign every nested binary so `vpk pack --signDisableDeep` only has to sign the binaries
+        # it adds itself plus the final bundle. Deep signing is Velopack's default but it is
+        # documented there as unreliable, and the main executable is signed last so the bundle
+        # signature seals binaries that are already valid.
+        echo "Signing nested binaries with entitlements..."
+        while IFS= read -r file; do
+          if [ "$file" != "$APP_PATH/Contents/MacOS/$APP_NAME" ]; then
+            echo "  $file"
+            codesign -s "$SIGN_IDENTITY" -f --timestamp --options runtime \
+              --entitlements "$ENTITLEMENTS" --keychain "$KEYCHAIN_PATH" "$file"
+          fi
+        done < "$MACHO_LIST"
+
+        echo "Signing main executable..."
+        codesign -s "$SIGN_IDENTITY" -f --timestamp --options runtime \
+          --entitlements "$ENTITLEMENTS" --keychain "$KEYCHAIN_PATH" \
+          "$APP_PATH/Contents/MacOS/$APP_NAME"
+
+        rm -f "$MACHO_LIST"
+
+    - name: Create Velopack Release (macOS signed)
+      if: matrix.os == 'macos-latest' && inputs.enable_signing
+      run: |
+        vpk pack -u "${{ inputs.app_name }}" -v ${{ needs.test.outputs.version }} \
+          -o "releases/${{ matrix.platform }}" -p "bundle/${{ inputs.app_name }}.app" \
+          --signAppIdentity "${{ secrets.MACOS_SIGN_APP_IDENTITY }}" \
+          --signInstallIdentity "${{ secrets.MACOS_SIGN_INSTALL_IDENTITY }}" \
+          --signEntitlements "${{ inputs.entitlements_path }}" \
+          --signDisableDeep \
+          --notaryProfile velopack-profile \
+          --keychain "${{ runner.temp }}/app-signing.keychain-db"
 
     - name: Clean up keychain
       if: matrix.os == 'macos-latest' && inputs.enable_signing && always()
