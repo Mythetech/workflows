@@ -25,12 +25,40 @@ jobs:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `dotnet_version` | No | `10.0.x` | .NET SDK version |
+| `dotnet_version` | No | `10.0.x` | .NET SDK version. Ignored when `global_json_file` is set |
+| `global_json_file` | No | - | Path to a `global.json` pinning the SDK. Takes precedence over `dotnet_version` |
 | `test_project` | No | - | Path to test project. If omitted, runs `dotnet test` in root |
 | `test_command` | No | - | Override the entire test command |
+| `test_runner` | No | `auto` | `auto`, `vstest` or `mtp`. See [Test runners](#test-runners) |
 | `enable_coverage` | No | `true` | Enable code coverage collection |
 | `coverage_threshold` | No | `0` | Minimum coverage % (0 disables threshold check) |
 | `upload_coverage_artifact` | No | `true` | Upload coverage results as artifact |
+
+#### Test runners
+
+Both VSTest and Microsoft.Testing.Platform (MTP) are supported. The two are mutually
+exclusive on the .NET 10 SDK and later, so the workflow detects which one a repository uses
+from the `test` block of its `global.json`:
+
+```json
+{
+  "sdk": { "version": "11.0.100" },
+  "test": { "runner": "Microsoft.Testing.Platform" }
+}
+```
+
+A repository with that block runs on MTP; one without it runs on VSTest. Opting in therefore
+needs no change to the calling workflow. Set `test_runner` to `vstest` or `mtp` explicitly
+only to override the detection.
+
+Coverage under MTP additionally requires the test project to reference
+`Microsoft.Testing.Extensions.CodeCoverage`. Without it the workflow still runs the tests and
+emits a warning rather than failing, since `coverlet.collector` is a VSTest data collector and
+does nothing under MTP.
+
+```xml
+<PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" Version="18.4.1" />
+```
 
 #### Code Coverage
 
@@ -56,7 +84,9 @@ with:
   enable_coverage: false
 ```
 
-**Prerequisite**: Test projects should include the Coverlet collector package:
+**Prerequisite**: VSTest projects should include the Coverlet collector package. MTP projects
+use `Microsoft.Testing.Extensions.CodeCoverage` instead, as described under
+[Test runners](#test-runners).
 
 ```xml
 <PackageReference Include="coverlet.collector" Version="6.0.4">

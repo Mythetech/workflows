@@ -15,6 +15,18 @@
 #
 # To pin the SDK from the repository's own global.json instead of dotnet_version:
 #       global_json_file: "global.json"
+#
+# Test runners:
+#
+# Both VSTest and Microsoft.Testing.Platform (MTP) are supported. The runner is
+# detected automatically from the "test" block of global.json, so a repository opts
+# in to MTP by adding the block below and needs no change to its workflow:
+#
+#   { "sdk": { ... }, "test": { "runner": "Microsoft.Testing.Platform" } }
+#
+# Coverage under MTP additionally requires the test project to reference the
+# Microsoft.Testing.Extensions.CodeCoverage package. Without it, tests still run and
+# the workflow warns rather than failing.
 
 name: PR Test
 
@@ -37,6 +49,13 @@ on:
         description: 'Override the test command entirely (e.g., "dotnet test --filter Category=Unit")'
         type: string
         required: false
+      test_runner:
+        description: >-
+          Which test runner the project uses: "auto", "vstest" or "mtp".
+          "auto" detects Microsoft.Testing.Platform from the test.runner property of
+          global.json and falls back to VSTest when absent.
+        type: string
+        default: 'auto'
       enable_coverage:
         description: 'Enable code coverage collection'
         type: boolean
@@ -76,10 +95,45 @@ jobs:
         TEST_CMD="${{ inputs.test_command }}"
         TEST_PROJECT="${{ inputs.test_project }}"
         ENABLE_COVERAGE="${{ inputs.enable_coverage }}"
+        TEST_RUNNER="${{ inputs.test_runner }}"
+        GLOBAL_JSON="${{ inputs.global_json_file }}"
+
+        # Resolve the runner. Microsoft.Testing.Platform and VSTest are mutually
+        # exclusive on the .NET 10 SDK and later, and the coverage arguments differ
+        # entirely between them, so every branch below keys off this one value.
+        if [ "$TEST_RUNNER" = "auto" ]; then
+          RUNNER="vstest"
+          GLOBAL_JSON_CANDIDATE="${GLOBAL_JSON:-./global.json}"
+          if [ -f "$GLOBAL_JSON_CANDIDATE" ]; then
+            DETECTED_RUNNER=$(jq -r '.test.runner // empty' "$GLOBAL_JSON_CANDIDATE" 2>/dev/null || echo "")
+            if [ "$DETECTED_RUNNER" = "Microsoft.Testing.Platform" ]; then
+              RUNNER="mtp"
+            fi
+          fi
+          echo "Detected test runner: $RUNNER (from $GLOBAL_JSON_CANDIDATE)"
+        else
+          RUNNER="$TEST_RUNNER"
+          echo "Test runner set explicitly: $RUNNER"
+        fi
+
+        if [ "$RUNNER" != "vstest" ] && [ "$RUNNER" != "mtp" ]; then
+          echo "::error::Invalid test_runner '$RUNNER'. Expected 'auto', 'vstest' or 'mtp'."
+          exit 1
+        fi
 
         # Build coverage arguments if enabled
         COVERAGE_ARGS=""
-        if [ "$ENABLE_COVERAGE" = "true" ]; then
+        if [ "$ENABLE_COVERAGE" = "true" ] && [ "$RUNNER" = "mtp" ]; then
+          # Passing --coverage without the extension package hard-fails the run with
+          # exit code 5 and zero tests executed, so probe before asking for it.
+          if [ -z "$TEST_PROJECT" ]; then
+            echo "::warning::Coverage under Microsoft.Testing.Platform requires 'test_project' to be set. Running without coverage."
+          elif dotnet list "$TEST_PROJECT" package --include-transitive 2>/dev/null | grep -qi 'Microsoft\.Testing\.Extensions\.CodeCoverage'; then
+            COVERAGE_ARGS='--coverage --coverage-output-format cobertura'
+          else
+            echo "::warning::Coverage under Microsoft.Testing.Platform requires the 'Microsoft.Testing.Extensions.CodeCoverage' package in $TEST_PROJECT. Running without coverage."
+          fi
+        elif [ "$ENABLE_COVERAGE" = "true" ]; then
           # Check for a .runsettings file in any .Test directory
           RUNSETTINGS_FILE=$(find . -name "*.runsettings" -path "*.Test/*" 2>/dev/null | head -1)
           if [ -n "$RUNSETTINGS_FILE" ]; then
@@ -90,16 +144,30 @@ jobs:
           fi
         fi
 
-        if [ -n "$TEST_CMD" ]; then
-          if [ "$ENABLE_COVERAGE" = "true" ]; then
+        if [ "$RUNNER" = "mtp" ]; then
+          # Results land in the same directory the VSTest path uses so the coverage
+          # report, threshold and artifact steps stay runner-agnostic.
+          MTP_ARGS="--results-directory ./TestResults"
+
+          if [ -n "$TEST_CMD" ]; then
             eval "$TEST_CMD $COVERAGE_ARGS"
+          elif [ -n "$TEST_PROJECT" ]; then
+            eval "dotnet test --project \"$TEST_PROJECT\" --configuration Release $MTP_ARGS $COVERAGE_ARGS"
           else
-            eval "$TEST_CMD"
+            eval "dotnet test --configuration Release $MTP_ARGS $COVERAGE_ARGS"
           fi
-        elif [ -n "$TEST_PROJECT" ]; then
-          eval "dotnet test \"$TEST_PROJECT\" --configuration Release $COVERAGE_ARGS"
         else
-          eval "dotnet test --configuration Release $COVERAGE_ARGS"
+          if [ -n "$TEST_CMD" ]; then
+            if [ "$ENABLE_COVERAGE" = "true" ]; then
+              eval "$TEST_CMD $COVERAGE_ARGS"
+            else
+              eval "$TEST_CMD"
+            fi
+          elif [ -n "$TEST_PROJECT" ]; then
+            eval "dotnet test \"$TEST_PROJECT\" --configuration Release $COVERAGE_ARGS"
+          else
+            eval "dotnet test --configuration Release $COVERAGE_ARGS"
+          fi
         fi
       shell: bash
       env:
@@ -110,7 +178,7 @@ jobs:
       run: |
         dotnet tool install -g dotnet-reportgenerator-globaltool || true
 
-        COVERAGE_FILE=$(find ./TestResults -name "coverage.cobertura.xml" 2>/dev/null | head -1)
+        COVERAGE_FILE=$(find ./TestResults -name "*.cobertura.xml" 2>/dev/null | head -1)
 
         if [ -n "$COVERAGE_FILE" ]; then
           echo "Found coverage file: $COVERAGE_FILE"
@@ -132,7 +200,7 @@ jobs:
       if: inputs.enable_coverage && inputs.coverage_threshold > 0
       run: |
         THRESHOLD=${{ inputs.coverage_threshold }}
-        COVERAGE_FILE=$(find ./TestResults -name "coverage.cobertura.xml" 2>/dev/null | head -1)
+        COVERAGE_FILE=$(find ./TestResults -name "*.cobertura.xml" 2>/dev/null | head -1)
 
         if [ -n "$COVERAGE_FILE" ]; then
           LINE_COVERAGE=$(grep -oP 'line-rate="\K[^"]+' "$COVERAGE_FILE" | head -1)
@@ -157,6 +225,6 @@ jobs:
       with:
         name: coverage-report
         path: |
-          ./TestResults/**/coverage.cobertura.xml
+          ./TestResults/**/*.cobertura.xml
           ./TestResults/CoverageReport/
         retention-days: 3
