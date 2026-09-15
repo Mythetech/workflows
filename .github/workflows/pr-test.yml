@@ -27,6 +27,18 @@
 # Coverage under MTP additionally requires the test project to reference the
 # Microsoft.Testing.Extensions.CodeCoverage package. Without it, tests still run and
 # the workflow warns rather than failing.
+#
+# Both runners pick up a *.runsettings file found under a *.Test directory, but the
+# schemas are not interchangeable:
+#
+#   VSTest reads the coverlet "XPlat Code Coverage" collector settings.
+#   MTP reads Microsoft Code Coverage settings, i.e. a
+#     <DataCollector friendlyName="Code Coverage"> with a <CodeCoverage> configuration
+#     holding <Sources> and <Attributes> include/exclude regexes.
+#
+# A coverlet-format file is silently ignored under MTP, so a repository opting in to
+# MTP must convert its runsettings to the Microsoft Code Coverage schema or its
+# exclusions will not apply.
 
 name: PR Test
 
@@ -123,6 +135,13 @@ jobs:
 
         # Build coverage arguments if enabled
         COVERAGE_ARGS=""
+        RUNSETTINGS_FILE=""
+        if [ "$ENABLE_COVERAGE" = "true" ]; then
+          # Check for a .runsettings file in any .Test directory. Both runners honour
+          # one, but each expects a different schema: see the header comment.
+          RUNSETTINGS_FILE=$(find . -name "*.runsettings" -path "*.Test/*" 2>/dev/null | head -1)
+        fi
+
         if [ "$ENABLE_COVERAGE" = "true" ] && [ "$RUNNER" = "mtp" ]; then
           # Passing --coverage without the extension package hard-fails the run with
           # exit code 5 and zero tests executed, so probe before asking for it.
@@ -130,12 +149,14 @@ jobs:
             echo "::warning::Coverage under Microsoft.Testing.Platform requires 'test_project' to be set. Running without coverage."
           elif dotnet list "$TEST_PROJECT" package --include-transitive 2>/dev/null | grep -qi 'Microsoft\.Testing\.Extensions\.CodeCoverage'; then
             COVERAGE_ARGS='--coverage --coverage-output-format cobertura'
+            if [ -n "$RUNSETTINGS_FILE" ]; then
+              echo "Using runsettings file: $RUNSETTINGS_FILE"
+              COVERAGE_ARGS="$COVERAGE_ARGS --coverage-settings \"$RUNSETTINGS_FILE\""
+            fi
           else
             echo "::warning::Coverage under Microsoft.Testing.Platform requires the 'Microsoft.Testing.Extensions.CodeCoverage' package in $TEST_PROJECT. Running without coverage."
           fi
         elif [ "$ENABLE_COVERAGE" = "true" ]; then
-          # Check for a .runsettings file in any .Test directory
-          RUNSETTINGS_FILE=$(find . -name "*.runsettings" -path "*.Test/*" 2>/dev/null | head -1)
           if [ -n "$RUNSETTINGS_FILE" ]; then
             echo "Using runsettings file: $RUNSETTINGS_FILE"
             COVERAGE_ARGS="--settings \"$RUNSETTINGS_FILE\" --collect:\"XPlat Code Coverage\" --results-directory ./TestResults"
