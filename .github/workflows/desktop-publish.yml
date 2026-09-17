@@ -346,6 +346,15 @@ jobs:
         # codesign seals a plain file in Contents/MacOS with an extended attribute, and xattrs do not
         # survive the .nupkg round trip the updater uses. Move everything that is not a Mach-O image
         # into Contents/Resources and symlink it back; symlinks need no signature of their own.
+        # The updater (UpdateMac) only creates directories that hold a file; empty directory entries
+        # in the .nupkg are skipped. A symlink to a directory that ends up empty therefore dangles
+        # after an update, and Gatekeeper rejects the whole app as damaged. Drop what `vpk pack`
+        # would exclude anyway (its default --exclude is .pdb, plus createdump, .vshost., .nupkg)
+        # so emptiness is visible now, then drop the empty directories.
+        echo "Removing files vpk excludes and empty directories..."
+        find "$APP_PATH/Contents/MacOS" -type f \( -name "*.pdb" -o -name "createdump*" -o -name "*.vshost.*" -o -name "*.nupkg" \) -print -delete
+        find "$APP_PATH/Contents/MacOS" -mindepth 1 -type d -empty -print -delete
+
         echo "Moving non-code files out of Contents/MacOS..."
         mkdir -p "$APP_PATH/Contents/Resources"
 
@@ -398,6 +407,16 @@ jobs:
 
         rm -f "$MACHO_LIST"
 
+        echo "Checking every symlink resolves..."
+        broken=0
+        while IFS= read -r -d '' link; do
+          if [ ! -e "$link" ]; then
+            echo "::error::Dangling symlink in bundle: $link -> $(readlink "$link")"
+            broken=1
+          fi
+        done < <(find "$APP_PATH" -type l -print0)
+        [ "$broken" -eq 0 ]
+
     - name: Create Velopack Release (macOS signed)
       if: matrix.os == 'macos-latest' && inputs.enable_signing
       run: |
@@ -409,6 +428,55 @@ jobs:
           --signDisableDeep \
           --notaryProfile velopack-profile \
           --keychain "${{ runner.temp }}/app-signing.keychain-db"
+
+    # Install the full update package the way UpdateMac does (directory entries skipped, .__symlink
+    # entries turned into symlinks after the files) and make Gatekeeper assess the result. A bundle
+    # that only breaks after an in-app update is otherwise invisible until a user hits it.
+    - name: Verify macOS update package installs as a valid app
+      if: matrix.os == 'macos-latest' && inputs.enable_signing
+      shell: bash
+      env:
+        RELEASE_DIR: releases/${{ matrix.platform }}
+        APP_NAME: ${{ inputs.app_name }}
+      run: |
+        set -euo pipefail
+        NUPKG=$(find "$RELEASE_DIR" -name "*-full.nupkg" -type f | head -n 1)
+        if [ -z "$NUPKG" ]; then
+          echo "::error::No full .nupkg found in $RELEASE_DIR"
+          exit 1
+        fi
+        TARGET="$RUNNER_TEMP/update-check/$APP_NAME.app"
+        rm -rf "$RUNNER_TEMP/update-check"
+        mkdir -p "$TARGET"
+
+        python3 - "$NUPKG" "$TARGET" <<'PY'
+        import os, re, sys, zipfile
+        nupkg, target = sys.argv[1], sys.argv[2]
+        prefix = re.compile(r"lib[\\/][^\\/]*[\\/]")
+        symlinks = []
+        with zipfile.ZipFile(nupkg) as z:
+            for info in z.infolist():
+                name = info.filename
+                if not prefix.match(name) or name.endswith("/"):
+                    continue
+                rel = prefix.sub("", name, count=1)
+                if rel.endswith(".__symlink"):
+                    symlinks.append((rel[: -len(".__symlink")], z.read(info).decode().rstrip("/")))
+                    continue
+                dest = os.path.join(target, rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as f:
+                    f.write(z.read(info))
+                os.chmod(dest, 0o755)
+        for rel, link_target in symlinks:
+            dest = os.path.join(target, rel)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.symlink(link_target, dest)
+        print(f"Installed {nupkg} to {target} ({len(symlinks)} symlinks)")
+        PY
+
+        codesign --verify --deep --strict --verbose=2 "$TARGET"
+        spctl --assess --type exec -vv "$TARGET"
 
     - name: Clean up keychain
       if: matrix.os == 'macos-latest' && inputs.enable_signing && always()
