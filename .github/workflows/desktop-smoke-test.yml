@@ -1,0 +1,205 @@
+# Reusable workflow for running tests and smoke tests on demand, without signing or publishing
+#
+# Builds the same unsigned Velopack packages as desktop-publish.yml and launches them on each
+# platform, so a large change can be checked before cutting a real release. Nothing is uploaded
+# to blob storage and no secrets are needed.
+#
+# Usage in calling repository:
+#
+# name: Smoke Test
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       platforms:
+#         description: 'Platforms to smoke test'
+#         type: choice
+#         options: [all, windows, macos, linux]
+#         default: all
+#
+# jobs:
+#   smoke-test:
+#     uses: mythetech/workflows/.github/workflows/desktop-smoke-test.yml@main
+#     with:
+#       app_name: "Horizon"
+#       project_path: "Horizon/Horizon.csproj"
+#       test_project: "Horizon.Test/Horizon.Test.csproj"
+#       icon_windows: "Horizon/wwwroot/logo.ico"
+#       icon_linux: "Horizon/wwwroot/logo.png"
+#       icon_macos: "Horizon/wwwroot/logo.icns"
+#       platforms: ${{ inputs.platforms }}
+#
+# To pin the SDK from the repository's own global.json instead of dotnet_version:
+#       global_json_file: "global.json"
+
+name: Desktop Smoke Test
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Application name (e.g., Horizon)'
+        type: string
+        required: true
+      project_path:
+        description: 'Path to the main project file (e.g., Horizon/Horizon.csproj)'
+        type: string
+        required: true
+      icon_windows:
+        description: 'Path to Windows icon file (.ico)'
+        type: string
+        required: true
+      icon_linux:
+        description: 'Path to Linux icon file (.png)'
+        type: string
+        required: true
+      icon_macos:
+        description: 'Path to macOS icon file (.icns)'
+        type: string
+        required: true
+      platforms:
+        description: 'Platforms to smoke test: "all", "windows", "macos" or "linux"'
+        type: string
+        default: 'all'
+      dotnet_version:
+        description: '.NET SDK version to use. Ignored when global_json_file is set.'
+        type: string
+        default: '10.0.x'
+      global_json_file:
+        description: 'Path to a global.json pinning the SDK. When set, takes precedence over dotnet_version.'
+        type: string
+        default: ''
+      enable_tests:
+        description: 'Run unit tests alongside the smoke tests'
+        type: boolean
+        default: true
+      test_project:
+        description: 'Path to the test project. If not specified, runs "dotnet test" in root.'
+        type: string
+        required: false
+      test_command:
+        description: 'Override the test command entirely'
+        type: string
+        required: false
+      test_runner:
+        description: 'Which test runner the project uses: "auto", "vstest" or "mtp". See pr-test.yml.'
+        type: string
+        default: 'auto'
+      enable_coverage:
+        description: 'Enable code coverage collection for the unit tests'
+        type: boolean
+        default: false
+
+jobs:
+  # Unit tests go through pr-test.yml so VSTest/MTP detection and coverage behave exactly as on PRs.
+  test:
+    if: inputs.enable_tests
+    uses: mythetech/workflows/.github/workflows/pr-test.yml@3c18d13a3b1c16396171ff95a3f75ba21db57de7 # pinned, bump on workflow edit
+    with:
+      dotnet_version: ${{ inputs.dotnet_version }}
+      global_json_file: ${{ inputs.global_json_file }}
+      test_project: ${{ inputs.test_project }}
+      test_command: ${{ inputs.test_command }}
+      test_runner: ${{ inputs.test_runner }}
+      enable_coverage: ${{ inputs.enable_coverage }}
+      upload_coverage_artifact: ${{ inputs.enable_coverage }}
+
+  # Filtering here rather than skipping steps inside the matrix avoids spinning up runners
+  # for platforms that were not selected.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+    - name: Select platforms
+      id: matrix
+      shell: bash
+      env:
+        PLATFORMS: ${{ inputs.platforms }}
+      run: |
+        ALL='[
+          {"os":"windows-latest","rid":"win-x64","platform":"Windows","key":"windows"},
+          {"os":"ubuntu-latest","rid":"linux-x64","platform":"Linux","key":"linux"},
+          {"os":"macos-latest","rid":"osx-arm64","platform":"macOS","key":"macos"}
+        ]'
+        SELECTED=$(echo "$PLATFORMS" | tr '[:upper:]' '[:lower:]')
+        if [ "$SELECTED" = "all" ]; then
+          INCLUDE=$(echo "$ALL" | jq -c '.')
+        else
+          INCLUDE=$(echo "$ALL" | jq -c --arg key "$SELECTED" 'map(select(.key == $key))')
+        fi
+        if [ "$INCLUDE" = "[]" ]; then
+          echo "::error::Invalid platforms '$PLATFORMS'. Expected 'all', 'windows', 'macos' or 'linux'."
+          exit 1
+        fi
+        echo "matrix={\"include\":$INCLUDE}" >> $GITHUB_OUTPUT
+
+  smoke-test:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup .NET (from global.json)
+      if: inputs.global_json_file != ''
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      with:
+        global-json-file: ${{ inputs.global_json_file }}
+
+    - name: Setup .NET
+      if: inputs.global_json_file == ''
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      with:
+        dotnet-version: ${{ inputs.dotnet_version }}
+
+    - name: Install Velopack CLI
+      run: dotnet tool update -g vpk
+
+    - name: Cache NuGet packages
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ~/.nuget/packages
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.*.props') }}
+        restore-keys: |
+          nuget-${{ runner.os }}-
+
+    - name: Select icon path
+      id: icon
+      shell: bash
+      run: |
+        case "${{ matrix.platform }}" in
+          Windows) echo "path=${{ inputs.icon_windows }}" >> $GITHUB_OUTPUT ;;
+          Linux) echo "path=${{ inputs.icon_linux }}" >> $GITHUB_OUTPUT ;;
+          macOS) echo "path=${{ inputs.icon_macos }}" >> $GITHUB_OUTPUT ;;
+        esac
+
+    - name: Publish
+      run: dotnet publish "${{ inputs.project_path }}" -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=false -o publish/${{ matrix.rid }}
+
+    # The version only has to be valid for vpk; these packages are never distributed.
+    - name: Create Velopack Release (unsigned)
+      run: vpk pack -u "${{ inputs.app_name }}" -v 0.0.${{ github.run_number }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
+
+    - name: Run Smoke Test
+      timeout-minutes: 3
+      uses: mythetech/workflows/actions/smoke-test@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
+      with:
+        app_name: ${{ inputs.app_name }}
+        platform: ${{ matrix.platform }}
+        releases_dir: releases/${{ matrix.platform }}
+
+    - name: Upload Failure Artifacts
+      if: failure()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: smoke-test-failure-${{ matrix.platform }}
+        path: screenshot-failure.png
+        retention-days: 14
