@@ -39,6 +39,13 @@
 # A coverlet-format file is silently ignored under MTP, so a repository opting in to
 # MTP must convert its runsettings to the Microsoft Code Coverage schema or its
 # exclusions will not apply.
+#
+# Internal packages:
+#
+# Repositories that consume the Mythetech GitHub Packages feed commit a nuget.config with
+# credentials read from GITHUB_PACKAGES_USER and GITHUB_PACKAGES_TOKEN. This workflow sets
+# both from GITHUB_TOKEN; the caller adds "packages: read" to its permissions and each
+# package grants the calling repository Actions access in its package settings.
 
 name: PR Test
 
@@ -80,6 +87,14 @@ on:
         description: 'Upload coverage results as workflow artifact'
         type: boolean
         default: true
+
+# Restore credentials for the Mythetech GitHub Packages feed. A consuming repository commits a
+# nuget.config whose packageSourceCredentials read these two variables, so no step here has to
+# add or update a source. GITHUB_TOKEN can read a package once that package grants the calling
+# repository Actions access, and the caller must pass packages: read in its permissions.
+env:
+  GITHUB_PACKAGES_USER: ${{ github.actor }}
+  GITHUB_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   test:
