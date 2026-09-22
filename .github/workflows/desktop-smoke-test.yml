@@ -89,6 +89,14 @@ on:
         type: boolean
         default: false
 
+# Restore credentials for the Mythetech GitHub Packages feed. A consuming repository commits a
+# nuget.config whose packageSourceCredentials read these two variables, so no step here has to
+# add or update a source. GITHUB_TOKEN can read a package once that package grants the calling
+# repository Actions access, and the caller must pass packages: read in its permissions.
+env:
+  GITHUB_PACKAGES_USER: ${{ github.actor }}
+  GITHUB_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   # Unit tests go through pr-test.yml so VSTest/MTP detection and coverage behave exactly as on PRs.
   test:
@@ -141,6 +149,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+      packages: read
 
     steps:
     - name: Checkout
