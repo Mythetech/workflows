@@ -2,10 +2,12 @@
 # Verdict rules for Hermes smoke runs, shared by the smoke-test action and Hermes CI.
 # Dot-source this file; Invoke-SmokeVerdict.ps1 is the command-line wrapper.
 
-Set-StrictMode -Version Latest
-
 function Get-SmokeLineValues {
     param([string[]] $LogLines, [Parameter(Mandatory)] [string] $Prefix)
+
+    # Scoped to this function, not file level: dot-sourcing this file (Hermes CI does) must not
+    # turn on strict mode in the caller's own scope.
+    Set-StrictMode -Version Latest
 
     foreach ($line in $LogLines) {
         # Logs captured on Windows keep a trailing carriage return on every line.
@@ -27,6 +29,8 @@ function New-SmokeVerdict {
         [string[]] $Warnings = @()
     )
 
+    Set-StrictMode -Version Latest
+
     [pscustomobject]@{
         Passed        = $Passed
         Source        = $Source
@@ -41,6 +45,8 @@ function New-SmokeVerdict {
 
 function Get-SmokeResultFileReason {
     param([Parameter(Mandatory)] $Result)
+
+    Set-StrictMode -Version Latest
 
     $checks = @($Result.checks)
     if ($Result.result -eq 'passed') {
@@ -80,6 +86,8 @@ function Get-SmokeVerdict {
         [bool] $LegacyAlive = $false,
         [bool] $RequireVerdict = $false
     )
+
+    Set-StrictMode -Version Latest
 
     $milestones = @(Get-SmokeLineValues -LogLines $LogLines -Prefix 'HERMES_SMOKE_MILESTONE:' | ForEach-Object { ($_ -split '\s+')[0] })
     $failedChecks = @(Get-SmokeLineValues -LogLines $LogLines -Prefix 'HERMES_SMOKE_CHECK_FAIL:')
@@ -146,6 +154,8 @@ function Get-SmokeVerdict {
 
 function Format-SmokeSummary {
     param([Parameter(Mandatory)] $Verdict, [string] $Platform = '')
+
+    Set-StrictMode -Version Latest
 
     $status = if ($Verdict.Passed) { 'PASSED' } else { 'FAILED' }
     $title = if ($Platform) { "### Smoke test ($Platform): $status" } else { "### Smoke test: $status" }

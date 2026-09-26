@@ -5,7 +5,7 @@ BeforeAll {
 
     function New-RunDirectory {
         param([string[]] $Log, [hashtable] $Run)
-        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+        $dir = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $dir | Out-Null
         if ($null -ne $Log) { Set-Content -LiteralPath (Join-Path $dir 'app-stdout.log') -Value $Log }
         if ($null -ne $Run) { $Run | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'run.json') }
@@ -25,13 +25,21 @@ BeforeAll {
 
 Describe 'Invoke-SmokeVerdict.ps1' {
     BeforeEach {
-        $script:OutputFile = New-TemporaryFile
-        $env:GITHUB_OUTPUT = $script:OutputFile.FullName
-        $env:GITHUB_STEP_SUMMARY = (New-TemporaryFile).FullName
+        # A real runner already has these set for the job; overwrite and restore them rather than
+        # deleting them, so the suite behaves the same locally and in self-test.yml.
+        $script:PreviousGitHubOutput = $env:GITHUB_OUTPUT
+        $script:PreviousGitHubStepSummary = $env:GITHUB_STEP_SUMMARY
+
+        $script:OutputFile = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '-output.txt')
+        New-Item -ItemType File -Path $script:OutputFile | Out-Null
+        $env:GITHUB_OUTPUT = $script:OutputFile
+        $env:GITHUB_STEP_SUMMARY = Join-Path $TestDrive ([guid]::NewGuid().ToString('N') + '-summary.md')
+        New-Item -ItemType File -Path $env:GITHUB_STEP_SUMMARY | Out-Null
     }
 
     AfterEach {
-        Remove-Item Env:GITHUB_OUTPUT, Env:GITHUB_STEP_SUMMARY -ErrorAction SilentlyContinue
+        $env:GITHUB_OUTPUT = $script:PreviousGitHubOutput
+        $env:GITHUB_STEP_SUMMARY = $script:PreviousGitHubStepSummary
     }
 
     It 'treats the string false as false for require_verdict' {
@@ -39,7 +47,7 @@ Describe 'Invoke-SmokeVerdict.ps1' {
 
         & $script:Command -OutputDir $dir -RequireVerdict 'false' -FailOnFailed 'false'
 
-        (Read-GitHubOutput $script:OutputFile.FullName)['result'] | Should -Be 'passed'
+        (Read-GitHubOutput $script:OutputFile)['result'] | Should -Be 'passed'
     }
 
     It 'treats the string true as true for require_verdict' {
@@ -47,7 +55,7 @@ Describe 'Invoke-SmokeVerdict.ps1' {
 
         & $script:Command -OutputDir $dir -RequireVerdict 'true' -FailOnFailed 'false'
 
-        (Read-GitHubOutput $script:OutputFile.FullName)['result'] | Should -Be 'failed'
+        (Read-GitHubOutput $script:OutputFile)['result'] | Should -Be 'failed'
     }
 
     It 'reports no verdict when the log file is missing' {
@@ -55,9 +63,19 @@ Describe 'Invoke-SmokeVerdict.ps1' {
 
         & $script:Command -OutputDir $dir -RequireVerdict 'false' -FailOnFailed 'false'
 
-        $outputs = Read-GitHubOutput $script:OutputFile.FullName
+        $outputs = Read-GitHubOutput $script:OutputFile
         $outputs['result'] | Should -Be 'failed'
         $outputs['reason'] | Should -Be 'The app was killed after the CI timeout without printing a verdict (no milestone was reached)'
+    }
+
+    It 'reports FAILED with a launcher-failure reason when run.json itself is missing' {
+        $dir = New-RunDirectory -Log @('some partial output') -Run $null
+
+        & $script:Command -OutputDir $dir -FailOnFailed 'false'
+
+        $outputs = Read-GitHubOutput $script:OutputFile
+        $outputs['result'] | Should -Be 'failed'
+        $outputs['reason'] | Should -Be 'The launcher did not record a run (it failed before or while starting the app)'
     }
 
     It 'writes the summary to the step summary file' {
@@ -68,7 +86,20 @@ Describe 'Invoke-SmokeVerdict.ps1' {
         Get-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Raw | Should -Match '### Smoke test \(Windows\): PASSED'
     }
 
+    It 'prints the last 50 lines of stdout and stderr when the verdict fails' {
+        $dir = New-RunDirectory -Log @('HERMES_SMOKE_RESULT: FAILED (1/1 checks failed, 0 errors)') -Run @{ mode = 'verdict'; exitCode = 1; timedOut = $false; legacyAlive = $false }
+        Set-Content -LiteralPath (Join-Path $dir 'app-stderr.log') -Value @('a stderr line')
+
+        $output = & $script:Command -OutputDir $dir -FailOnFailed 'false'
+
+        $output | Should -Contain '::group::App stdout (last 50 lines)'
+        $output | Should -Contain 'HERMES_SMOKE_RESULT: FAILED (1/1 checks failed, 0 errors)'
+        $output | Should -Contain '::group::App stderr (last 50 lines)'
+        $output | Should -Contain 'a stderr line'
+    }
+
     It 'exits 1 on a failed verdict when failing is enabled' {
+        $global:LASTEXITCODE = 0
         $dir = New-RunDirectory -Log @('HERMES_SMOKE_RESULT: FAILED (1/1 checks failed, 0 errors)') -Run @{ mode = 'verdict'; exitCode = 1; timedOut = $false; legacyAlive = $false }
 
         & $script:Command -OutputDir $dir -FailOnFailed 'true' | Out-Null

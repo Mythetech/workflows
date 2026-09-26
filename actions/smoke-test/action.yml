@@ -69,6 +69,7 @@ runs:
 
     - name: Decide Verdict
       id: verdict
+      if: ${{ !cancelled() }}
       shell: pwsh
       env:
         SMOKE_PLATFORM: ${{ inputs.platform }}

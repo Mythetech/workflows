@@ -3,7 +3,10 @@ description: 'Decides pass or fail for a Hermes smoke run from its log, result J
 
 inputs:
   output_dir:
-    description: 'Directory holding app-stdout.log, result.json and run.json'
+    description: >-
+      Directory holding app-stdout.log, optionally app-stderr.log and result.json, and run.json
+      ({ "mode": "verdict"|"legacy", "exitCode": int|null, "timedOut": bool, "legacyAlive": bool })
+      as written by Start-SmokeRun.ps1
     required: true
   require_verdict:
     description: 'Fail when the app predates smoke mode instead of accepting a liveness check'
