@@ -111,18 +111,18 @@ function Find-SmokeTarget {
             if (-not $zip) { $zip = Get-ChildItem -Path $ReleasesDir -Filter '*.zip' -Recurse | Select-Object -First 1 }
             if (-not $zip) { throw "No zip archive found in $ReleasesDir" }
             # unzip keeps the symlinks and executable bits an app bundle needs; Expand-Archive does not.
-            & unzip -q $zip.FullName -d $WorkDir
+            & unzip -q $zip.FullName -d $WorkDir | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "unzip failed for $($zip.FullName)" }
 
             $bundle = Get-ChildItem -Path $WorkDir -Filter '*.app' -Directory -Recurse | Select-Object -First 1
             if (-not $bundle) { throw "No .app bundle found in $($zip.FullName)" }
-            & xattr -cr $bundle.FullName
+            & xattr -cr $bundle.FullName | Out-Null
             return $bundle.FullName
         }
         'Linux' {
             $appImage = Get-ChildItem -Path $ReleasesDir -Filter '*.AppImage' -Recurse | Select-Object -First 1
             if (-not $appImage) { throw "No AppImage found in $ReleasesDir" }
-            & chmod +x $appImage.FullName
+            & chmod +x $appImage.FullName | Out-Null
             return $appImage.FullName
         }
         default { throw "Unknown platform '$Platform'" }
@@ -164,14 +164,53 @@ function Stop-SmokeApp {
             }
         }
         'macOS' {
-            & osascript -e "quit app `"$AppName`"" 2>$null
+            # A hung app can leave osascript waiting forever for the Apple Event reply; bound it
+            # so a stuck quit still falls through to pkill instead of hanging the whole step.
+            & osascript -e 'with timeout of 5 seconds' -e "quit app `"$AppName`"" -e 'end timeout' 2>&1 | Out-Null
+            & pkill -x $AppName 2>&1 | Out-Null
             Start-Sleep -Seconds 2
-            & pkill -x $AppName 2>$null
+            & pkill -KILL -x $AppName 2>&1 | Out-Null
         }
     }
 
     if (-not $Process.HasExited) { $Process.Kill($true) }
     $null = $Process.WaitForExit(10000)
+
+    # pkill exits 1 when nothing matches, which is the expected outcome once quit already worked.
+    # GitHub's pwsh step wrapper turns a stale $LASTEXITCODE into a failed step, so clear it here.
+    $global:LASTEXITCODE = 0
+}
+
+function Get-SmokeRunOutcome {
+    param(
+        [Parameter(Mandatory)] [string] $Platform,
+        [Parameter(Mandatory)] [bool] $Started,
+        [Parameter(Mandatory)] [ValidateSet('verdict', 'legacy')] [string] $Mode,
+        [Parameter(Mandatory)] [bool] $TimedOut,
+        [Parameter(Mandatory)] [bool] $LegacyAlive,
+        [Nullable[int]] $ExitCode = $null,
+        [Parameter(Mandatory)] [bool] $StartedAfterExit
+    )
+
+    if (-not $Started -and $StartedAfterExit) {
+        if ($Mode -eq 'legacy') {
+            # The start line was there but unreadable while the app ran; never pass a smoke-aware app on liveness.
+            $Mode = 'verdict'
+            $TimedOut = $true
+            $LegacyAlive = $false
+        }
+        $Started = $true
+    }
+
+    if (-not $Started -and $Mode -eq 'verdict' -and -not $TimedOut) {
+        # Exited without ever printing the start line: a crash, judged by the legacy rules.
+        $Mode = 'legacy'
+        $LegacyAlive = $false
+    }
+
+    $finalExitCode = if ($Platform -eq 'macOS' -or $TimedOut -or $Mode -eq 'legacy') { $null } else { $ExitCode }
+
+    [ordered]@{ mode = $Mode; exitCode = $finalExitCode; timedOut = $TimedOut; legacyAlive = $LegacyAlive }
 }
 
 function Invoke-SmokeRun {
@@ -181,7 +220,18 @@ function Invoke-SmokeRun {
     $stdoutPath = Join-Path $outputPath 'app-stdout.log'
     $stderrPath = Join-Path $outputPath 'app-stderr.log'
     $resultPath = Join-Path $outputPath 'result.json'
+    $runPath = Join-Path $outputPath 'run.json'
     $workDir = Join-Path (Get-Location) 'smoke-app'
+
+    # A second run reusing OutputDir/WorkDir (retries in the same job) must never let a prior
+    # run's leftovers produce a false verdict or make unzip/Expand-Archive prompt or merge into
+    # an existing bundle.
+    foreach ($path in @($stdoutPath, $stderrPath, $resultPath, $runPath)) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $workDir) {
+        Remove-Item -LiteralPath $workDir -Recurse -Force
+    }
 
     $target = Find-SmokeTarget -Platform $Platform -AppName $AppName -ReleasesDir $ReleasesDir -WorkDir $workDir
     $environment = Get-SmokeEnvironment -TimeoutSeconds $TimeoutSeconds -ResultPath $resultPath
@@ -227,31 +277,20 @@ function Invoke-SmokeRun {
         Start-Sleep -Milliseconds 500
     }
 
-    if (-not $started -and (Test-SmokeStarted -LogPath $stdoutPath)) {
-        if ($mode -eq 'legacy') {
-            # The start line was there but unreadable while the app ran; never pass a smoke-aware app on liveness.
-            $mode = 'verdict'
-            $timedOut = $true
-            $legacyAlive = $false
-        }
-        $started = $true
-    }
+    $outcome = Get-SmokeRunOutcome -Platform $Platform -Started $started -Mode $mode -TimedOut $timedOut `
+        -LegacyAlive $legacyAlive -ExitCode $process.ExitCode -StartedAfterExit (Test-SmokeStarted -LogPath $stdoutPath)
 
-    if (-not $started -and $mode -eq 'verdict' -and -not $timedOut) {
-        # Exited without ever printing the start line: a crash, judged by the legacy rules.
-        $mode = 'legacy'
-        $legacyAlive = $false
-    }
+    $outcome | ConvertTo-Json | Set-Content -LiteralPath $runPath
 
-    $exitCode = if ($Platform -eq 'macOS' -or $timedOut -or $mode -eq 'legacy') { $null } else { $process.ExitCode }
-
-    [ordered]@{ mode = $mode; exitCode = $exitCode; timedOut = $timedOut; legacyAlive = $legacyAlive } |
-        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $outputPath 'run.json')
-
-    Write-Output "Run finished: mode=$mode timedOut=$timedOut exitCode=$exitCode"
+    Write-Output "Run finished: mode=$($outcome.mode) timedOut=$($outcome.timedOut) exitCode=$($outcome.exitCode)"
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     Invoke-SmokeRun -AppName $AppName -Platform $Platform -ReleasesDir $ReleasesDir -OutputDir $OutputDir -TimeoutSeconds $TimeoutSeconds
+
+    # The launcher's job is to record the run; Invoke-SmokeVerdict.ps1 judges it. A stale
+    # $LASTEXITCODE from a native tool called during the run (for example Stop-SmokeApp's pkill)
+    # would otherwise make GitHub's pwsh step wrapper fail this step even on a recorded pass.
+    exit 0
 }
