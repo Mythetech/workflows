@@ -1,0 +1,34 @@
+# Runs the Pester tests for the scripts behind the composite actions in this repository.
+name: Self Test
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+
+jobs:
+  pester:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Run Pester tests
+      shell: pwsh
+      run: |
+        if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.5.0' })) {
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force
+        }
+        Import-Module Pester -MinimumVersion 5.5.0
+        $config = New-PesterConfiguration
+        $config.Run.Path = 'actions'
+        $config.Run.Exit = $true
+        $config.Output.Verbosity = 'Detailed'
+        Invoke-Pester -Configuration $config
