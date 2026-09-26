@@ -1,5 +1,5 @@
 name: 'Smoke Test Desktop App'
-description: 'Verifies that a desktop application can launch and display a window'
+description: 'Launches a packaged desktop app in Hermes smoke mode and fails unless it reports a passing verdict'
 
 inputs:
   app_name:
@@ -12,262 +12,103 @@ inputs:
     description: 'Directory containing the release artifacts'
     required: true
     default: 'releases'
+  timeout:
+    description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT'
+    required: false
+    default: '60'
+  require_verdict:
+    description: 'Fail when the app predates smoke mode instead of falling back to a liveness check'
+    required: false
+    default: 'false'
+  output_dir:
+    description: 'Directory for the app log, result JSON, run record and failure screenshot'
+    required: false
+    default: 'smoke-output'
+
+outputs:
+  result:
+    description: 'passed or failed'
+    value: ${{ steps.verdict.outputs.result }}
+  reason:
+    description: 'One-line explanation of the verdict'
+    value: ${{ steps.verdict.outputs.reason }}
 
 runs:
   using: 'composite'
   steps:
-    # Windows smoke test
-    - name: Smoke Test (Windows)
-      if: inputs.platform == 'Windows'
-      shell: pwsh
-      run: |
-        # Find and extract portable zip (simpler than installer for CI)
-        $zip = Get-ChildItem -Path "${{ inputs.releases_dir }}" -Filter "*Portable*.zip" -Recurse | Select-Object -First 1
-        if (-not $zip) {
-          # Fall back to any zip
-          $zip = Get-ChildItem -Path "${{ inputs.releases_dir }}" -Filter "*.zip" -Recurse | Select-Object -First 1
-        }
-        if (-not $zip) { throw "No zip archive found in ${{ inputs.releases_dir }}/" }
-
-        Write-Output "Extracting: $($zip.FullName)"
-        Expand-Archive -Path $zip.FullName -DestinationPath "app" -Force
-
-        # List contents to diagnose missing assemblies
-        Write-Output "=== Package contents (app/current/) ==="
-        Get-ChildItem -Path "app/current" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-          Write-Output "  $($_.FullName.Replace((Get-Location).Path + '\app\current\', ''))"
-        }
-        Write-Output "=== End package contents ==="
-
-        # Check specifically for WebView2 assemblies
-        $webview2 = Get-ChildItem -Path "app" -Filter "Microsoft.Web.WebView2*.dll" -Recurse
-        if ($webview2) {
-          Write-Output "Found WebView2 assemblies:"
-          $webview2 | ForEach-Object { Write-Output "  $($_.FullName)" }
-        } else {
-          Write-Warning "WebView2 assemblies NOT found in package"
-        }
-
-        # Prefer the real app in current/ (Velopack packages have a launcher stub at root)
-        $exe = Get-ChildItem -Path "app/current" -Filter "${{ inputs.app_name }}.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $exe) {
-          $exe = Get-ChildItem -Path "app" -Filter "${{ inputs.app_name }}.exe" -Recurse | Select-Object -First 1
-        }
-        if (-not $exe) { throw "${{ inputs.app_name }}.exe not found in package" }
-
-        Write-Output "Launching: $($exe.FullName)"
-
-        # Set extraction directory for single-file apps to avoid Windows Defender issues with %TEMP%
-        $extractDir = Join-Path $PWD "dotnet-extract"
-        New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-        [System.Environment]::SetEnvironmentVariable("DOTNET_BUNDLE_EXTRACT_BASE_DIR", $extractDir, "Process")
-        Write-Output "Set DOTNET_BUNDLE_EXTRACT_BASE_DIR=$extractDir"
-
-        # Use ProcessStartInfo to ensure environment variables are inherited
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $exe.FullName
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardError = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = $extractDir
-        $psi.Environment["HERMES_SMOKE_TEST"] = "1"
-        $launchedProcess = [System.Diagnostics.Process]::Start($psi)
-        Write-Output "Launched process PID: $($launchedProcess.Id)"
-
-        # Poll for the process to appear (startup can be slow on CI)
-        $maxWait = 60
-        $elapsed = 0
-        $appProcess = $null
-        while ($elapsed -lt $maxWait) {
-          Start-Sleep -Seconds 5
-          $elapsed += 5
-
-          # Check if the launched process crashed or exited early
-          if ($launchedProcess.HasExited -and -not $appProcess) {
-            Write-Warning "Launched process exited with code $($launchedProcess.ExitCode)"
-            $stderr = $launchedProcess.StandardError.ReadToEnd()
-            $stdout = $launchedProcess.StandardOutput.ReadToEnd()
-            if ($stderr) { Write-Output "=== STDERR ===$([Environment]::NewLine)$stderr" }
-            if ($stdout) { Write-Output "=== STDOUT ===$([Environment]::NewLine)$stdout" }
-            Write-Error "${{ inputs.app_name }} process exited unexpectedly with code $($launchedProcess.ExitCode)"
-            exit 1
-          }
-
-          $appProcess = Get-Process -Name "${{ inputs.app_name }}" -ErrorAction SilentlyContinue
-          if ($appProcess) {
-            Write-Output "${{ inputs.app_name }} process found after $elapsed seconds"
-            break
-          }
-          Write-Output "Waiting for ${{ inputs.app_name }} process... ($elapsed/$maxWait seconds)"
-        }
-        if (-not $appProcess) {
-          Write-Output "=== Running processes ==="
-          Get-Process | Where-Object { $_.MainWindowTitle -or $_.ProcessName -match 'dotnet|siren|${{ inputs.app_name }}' } |
-            Format-Table ProcessName, Id, MainWindowTitle -AutoSize | Out-String | Write-Output
-          Write-Output "=== All dotnet-related processes ==="
-          Get-Process | Where-Object { $_.Path -and $_.Path -like "*app*" } |
-            Format-Table ProcessName, Id, Path -AutoSize | Out-String | Write-Output
-          Write-Error "${{ inputs.app_name }} process not found after $maxWait seconds"
-          exit 1
-        }
-
-        Write-Output "Found ${{ inputs.app_name }} process (PID: $($appProcess.Id))"
-
-        if (-not $appProcess.MainWindowHandle -or $appProcess.MainWindowHandle -eq 0) {
-          Write-Warning "Main window handle not found, but process is running"
-        } else {
-          Write-Output "Window title: $($appProcess.MainWindowTitle)"
-        }
-
-        # Clean shutdown
-        $appProcess.CloseMainWindow() | Out-Null
-        if (-not $appProcess.WaitForExit(10000)) {
-          Write-Warning "App did not close gracefully, killing..."
-          $appProcess.Kill()
-        }
-        Write-Output "Windows smoke test PASSED"
-
-    # macOS smoke test
-    - name: Smoke Test (macOS)
-      if: inputs.platform == 'macOS'
-      shell: bash
-      run: |
-        # Find portable app zip
-        ZIP_FILE=$(find "${{ inputs.releases_dir }}" -name "*Portable*.zip" 2>/dev/null | head -1)
-        if [ -z "$ZIP_FILE" ]; then
-          # Fall back to any zip
-          ZIP_FILE=$(find "${{ inputs.releases_dir }}" -name "*.zip" 2>/dev/null | head -1)
-        fi
-        if [ -z "$ZIP_FILE" ]; then
-          echo "No zip archive found"
-          ls -la "${{ inputs.releases_dir }}/"
-          exit 1
-        fi
-
-        echo "Extracting: $ZIP_FILE"
-        unzip -q "$ZIP_FILE" -d app
-
-        APP_BUNDLE=$(find app -name "*.app" -type d | head -1)
-        if [ -z "$APP_BUNDLE" ]; then
-          echo "No .app bundle found in archive"
-          ls -laR app/
-          exit 1
-        fi
-
-        # Clear quarantine flag (required for CI)
-        xattr -cr "$APP_BUNDLE"
-
-        echo "Launching: $APP_BUNDLE"
-        open "$APP_BUNDLE"
-
-        # Poll for the process to appear
-        MAX_WAIT=60
-        ELAPSED=0
-        while [ $ELAPSED -lt $MAX_WAIT ]; do
-          sleep 5
-          ELAPSED=$((ELAPSED + 5))
-          if pgrep -x "${{ inputs.app_name }}" > /dev/null; then
-            echo "${{ inputs.app_name }} process found after $ELAPSED seconds"
-            break
-          fi
-          echo "Waiting for ${{ inputs.app_name }} process... ($ELAPSED/$MAX_WAIT seconds)"
-        done
-        if ! pgrep -x "${{ inputs.app_name }}" > /dev/null; then
-          echo "Application not running after $MAX_WAIT seconds"
-          exit 1
-        fi
-
-        # Give the window time to fully render before checking via AppleScript
-        sleep 10
-
-        # Verify window exists via AppleScript
-        osascript -e 'tell application "System Events" to get name of first window of process "${{ inputs.app_name }}"' || {
-          echo "Warning: Could not verify window via AppleScript, but process is running"
-        }
-
-        # Clean shutdown
-        osascript -e 'quit app "${{ inputs.app_name }}"' || true
-        sleep 2
-        echo "macOS smoke test PASSED"
-
-    # Linux dependencies
     - name: Install Linux Dependencies
       if: inputs.platform == 'Linux'
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y xvfb libgtk-3-0 libwebkit2gtk-4.1-0 xdotool libfuse2 libnotify4
+        sudo apt-get install -y xvfb libgtk-3-0 libwebkit2gtk-4.1-0 xdotool libfuse2 libnotify4 scrot
 
-    # Linux smoke test
-    - name: Smoke Test (Linux)
+    - name: Start Virtual Display (Linux)
       if: inputs.platform == 'Linux'
       shell: bash
       run: |
-        # Find AppImage
-        APPIMAGE=$(find "${{ inputs.releases_dir }}" -name "*.AppImage" | head -1)
-        if [ -z "$APPIMAGE" ]; then
-          echo "No AppImage found"
-          ls -la "${{ inputs.releases_dir }}/"
-          exit 1
-        fi
-        chmod +x "$APPIMAGE"
-
-        # Start virtual display
-        export DISPLAY=:99
         Xvfb :99 -screen 0 1920x1080x24 &
-        XVFB_PID=$!
         sleep 2
 
-        echo "Launching: $APPIMAGE"
-        "$APPIMAGE" &
-        APP_PID=$!
-        sleep 20
+    - name: Run App in Smoke Mode
+      shell: pwsh
+      env:
+        DISPLAY: ':99'
+        SMOKE_APP_NAME: ${{ inputs.app_name }}
+        SMOKE_PLATFORM: ${{ inputs.platform }}
+        SMOKE_RELEASES_DIR: ${{ inputs.releases_dir }}
+        SMOKE_OUTPUT_DIR: ${{ inputs.output_dir }}
+        SMOKE_TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        & (Join-Path $env:GITHUB_ACTION_PATH 'Start-SmokeRun.ps1') `
+          -AppName $env:SMOKE_APP_NAME `
+          -Platform $env:SMOKE_PLATFORM `
+          -ReleasesDir $env:SMOKE_RELEASES_DIR `
+          -OutputDir $env:SMOKE_OUTPUT_DIR `
+          -TimeoutSeconds ([int]$env:SMOKE_TIMEOUT)
 
-        # Check if still running
-        if ! kill -0 $APP_PID 2>/dev/null; then
-          echo "Application crashed"
-          kill $XVFB_PID 2>/dev/null || true
-          exit 1
-        fi
+    - name: Decide Verdict
+      id: verdict
+      shell: pwsh
+      env:
+        SMOKE_PLATFORM: ${{ inputs.platform }}
+        SMOKE_OUTPUT_DIR: ${{ inputs.output_dir }}
+        SMOKE_REQUIRE_VERDICT: ${{ inputs.require_verdict }}
+      run: |
+        & (Join-Path $env:GITHUB_ACTION_PATH '..' 'smoke-verdict' 'Invoke-SmokeVerdict.ps1') `
+          -OutputDir $env:SMOKE_OUTPUT_DIR `
+          -RequireVerdict $env:SMOKE_REQUIRE_VERDICT `
+          -Platform $env:SMOKE_PLATFORM
 
-        # Verify window using xdotool
-        WINDOW_ID=$(xdotool search --name "${{ inputs.app_name }}" 2>/dev/null | head -1)
-        if [ -z "$WINDOW_ID" ]; then
-          echo "Warning: Could not find ${{ inputs.app_name }} window via xdotool, but process is running"
-        else
-          echo "Found window ID: $WINDOW_ID"
-        fi
-
-        # Cleanup
-        kill $APP_PID 2>/dev/null || true
-        kill $XVFB_PID 2>/dev/null || true
-        echo "Linux smoke test PASSED"
-
-    # Screenshot on failure
     - name: Screenshot on Failure (Windows)
       if: failure() && inputs.platform == 'Windows'
       shell: pwsh
+      env:
+        SMOKE_OUTPUT_DIR: ${{ inputs.output_dir }}
       run: |
+        New-Item -ItemType Directory -Force -Path $env:SMOKE_OUTPUT_DIR | Out-Null
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
         $screen = [System.Windows.Forms.Screen]::PrimaryScreen
         $bitmap = New-Object System.Drawing.Bitmap($screen.Bounds.Width, $screen.Bounds.Height)
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $graphics.CopyFromScreen($screen.Bounds.Location, [System.Drawing.Point]::Empty, $screen.Bounds.Size)
-        $bitmap.Save("screenshot-failure.png")
-        Write-Output "Screenshot saved to screenshot-failure.png"
+        $bitmap.Save((Join-Path $env:SMOKE_OUTPUT_DIR 'screenshot-failure.png'))
 
     - name: Screenshot on Failure (macOS)
       if: failure() && inputs.platform == 'macOS'
       shell: bash
+      env:
+        SMOKE_OUTPUT_DIR: ${{ inputs.output_dir }}
       run: |
-        screencapture -x screenshot-failure.png || true
-        echo "Screenshot saved to screenshot-failure.png"
+        mkdir -p "$SMOKE_OUTPUT_DIR"
+        screencapture -x "$SMOKE_OUTPUT_DIR/screenshot-failure.png" || true
 
     - name: Screenshot on Failure (Linux)
       if: failure() && inputs.platform == 'Linux'
       shell: bash
+      env:
+        SMOKE_OUTPUT_DIR: ${{ inputs.output_dir }}
       run: |
-        sudo apt-get install -y scrot || true
-        DISPLAY=:99 scrot screenshot-failure.png || true
-        echo "Screenshot saved to screenshot-failure.png"
+        mkdir -p "$SMOKE_OUTPUT_DIR"
+        DISPLAY=:99 scrot "$SMOKE_OUTPUT_DIR/screenshot-failure.png" || true
