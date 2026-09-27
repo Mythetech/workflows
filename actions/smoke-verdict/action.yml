@@ -1,0 +1,48 @@
+name: 'Hermes Smoke Verdict'
+description: 'Decides pass or fail for a Hermes smoke run from its log, result JSON and run record'
+
+inputs:
+  output_dir:
+    description: >-
+      Directory holding app-stdout.log, optionally app-stderr.log and result.json, and run.json
+      ({ "mode": "verdict"|"legacy", "exitCode": int|null, "timedOut": bool, "legacyAlive": bool })
+      as written by Start-SmokeRun.ps1
+    required: true
+  require_verdict:
+    description: 'Fail when the app predates smoke mode instead of accepting a liveness check'
+    required: false
+    default: 'false'
+  fail_on_failed:
+    description: 'Fail the step when the verdict is FAILED'
+    required: false
+    default: 'true'
+  platform:
+    description: 'Platform name for the job summary heading'
+    required: false
+    default: ''
+
+outputs:
+  result:
+    description: 'passed or failed'
+    value: ${{ steps.verdict.outputs.result }}
+  reason:
+    description: 'One-line explanation of the verdict'
+    value: ${{ steps.verdict.outputs.reason }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Decide Verdict
+      id: verdict
+      shell: pwsh
+      env:
+        SMOKE_OUTPUT_DIR: ${{ inputs.output_dir }}
+        SMOKE_REQUIRE_VERDICT: ${{ inputs.require_verdict }}
+        SMOKE_FAIL_ON_FAILED: ${{ inputs.fail_on_failed }}
+        SMOKE_PLATFORM: ${{ inputs.platform }}
+      run: |
+        & (Join-Path $env:GITHUB_ACTION_PATH 'Invoke-SmokeVerdict.ps1') `
+          -OutputDir $env:SMOKE_OUTPUT_DIR `
+          -RequireVerdict $env:SMOKE_REQUIRE_VERDICT `
+          -FailOnFailed $env:SMOKE_FAIL_ON_FAILED `
+          -Platform $env:SMOKE_PLATFORM

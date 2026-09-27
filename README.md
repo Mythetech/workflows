@@ -171,6 +171,62 @@ Configure these at the **organization level** for sharing across repos:
 
 ---
 
+### `desktop-smoke-test.yml`
+
+Runs unit tests and smoke tests on demand, without signing or publishing. Builds the same
+unsigned Velopack packages as `desktop-publish.yml`, then launches them on each selected
+platform. Useful for checking a large change before cutting a release. No secrets are needed.
+
+```yaml
+name: Smoke Test
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to smoke test'
+        type: choice
+        options: [all, windows, macos, linux]
+        default: all
+
+jobs:
+  smoke-test:
+    uses: mythetech/workflows/.github/workflows/desktop-smoke-test.yml@main
+    with:
+      app_name: "Horizon"
+      project_path: "Horizon/Horizon.csproj"
+      test_project: "Horizon.Test/Horizon.Test.csproj"
+      icon_windows: "Horizon/wwwroot/logo.ico"
+      icon_linux: "Horizon/wwwroot/logo.png"
+      icon_macos: "Horizon/wwwroot/logo.icns"
+      platforms: ${{ inputs.platforms }}
+```
+
+Unit tests run through `pr-test.yml`, so VSTest/MTP detection works the same as on pull
+requests. Tests and smoke tests run in parallel.
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `app_name` | **Yes** | - | Application name (e.g., "Horizon") |
+| `project_path` | **Yes** | - | Path to main .csproj |
+| `icon_windows` | **Yes** | - | Windows icon (.ico) |
+| `icon_linux` | **Yes** | - | Linux icon (.png) |
+| `icon_macos` | **Yes** | - | macOS icon (.icns) |
+| `platforms` | No | `all` | `all`, `windows`, `macos` or `linux` |
+| `dotnet_version` | No | `10.0.x` | .NET SDK version. Ignored when `global_json_file` is set |
+| `global_json_file` | No | - | Path to a `global.json` pinning the SDK |
+| `enable_tests` | No | `true` | Run unit tests alongside the smoke tests |
+| `test_project` | No | - | Path to test project. If omitted, runs `dotnet test` in root |
+| `test_command` | No | - | Override the entire test command |
+| `test_runner` | No | `auto` | `auto`, `vstest` or `mtp` |
+| `enable_coverage` | No | `false` | Collect code coverage for the unit tests |
+
+The packages are unsigned, so the macOS signing-specific bundle restructuring from
+`desktop-publish.yml` is not exercised here.
+
+---
+
 ## Composite Actions
 
 ### `actions/macos-sign`

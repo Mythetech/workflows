@@ -1,0 +1,190 @@
+# Runs the Pester tests for the scripts behind the composite actions in this repository.
+name: Self Test
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+
+jobs:
+  pester:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - name: Run Pester tests
+      shell: pwsh
+      run: |
+        if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.5.0' })) {
+          # windows-latest ships Pester 3.4 in-box, signed by a publisher not already trusted on
+          # the runner; without this flag the install prompts and the non-interactive step hangs.
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+        }
+        Import-Module Pester -MinimumVersion 5.5.0
+        $config = New-PesterConfiguration
+        $config.Run.Path = 'actions'
+        $config.Run.Exit = $true
+        $config.Output.Verbosity = 'Detailed'
+        Invoke-Pester -Configuration $config
+
+  launcher-e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout
+      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    # Three fixtures, each with its own releases_dir/output_dir: a legacy app that never speaks
+    # the smoke protocol, and two smoke-aware apps that report PASSED and FAILED. Running the
+    # real composite action against each is what proves the launcher's exit status and verdict
+    # wiring works under GitHub's actual pwsh step wrapper, not just under Pester.
+    - name: Build Linux fixtures
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        mkdir -p fixtures/legacy/releases fixtures/pass/releases fixtures/fail/releases
+
+        cat > fixtures/legacy/releases/Fixture.AppImage <<'SCRIPT'
+        #!/bin/bash
+        sleep 120
+        SCRIPT
+
+        cat > fixtures/pass/releases/Fixture.AppImage <<'SCRIPT'
+        #!/bin/bash
+        echo "HERMES_SMOKE_START: Fixture 1.0.0 Linux x64"
+        sleep 0.2
+        echo "HERMES_SMOKE_MILESTONE: window-shown 5ms"
+        sleep 0.2
+        echo "HERMES_SMOKE_RESULT: PASSED (0 checks)"
+        exit 0
+        SCRIPT
+
+        cat > fixtures/fail/releases/Fixture.AppImage <<'SCRIPT'
+        #!/bin/bash
+        echo "HERMES_SMOKE_START: Fixture 1.0.0 Linux x64"
+        sleep 0.2
+        echo "HERMES_SMOKE_RESULT: FAILED (1/1 checks failed, 0 errors)"
+        exit 1
+        SCRIPT
+
+        chmod +x fixtures/legacy/releases/Fixture.AppImage fixtures/pass/releases/Fixture.AppImage fixtures/fail/releases/Fixture.AppImage
+
+    - name: Build macOS fixtures
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        for name in legacy pass fail; do
+          mkdir -p "fixtures/$name/releases" "fixtures/$name/build/Fixture.app/Contents/MacOS"
+          cat > "fixtures/$name/build/Fixture.app/Contents/Info.plist" <<'PLIST'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>CFBundleExecutable</key>
+          <string>Fixture</string>
+          <key>CFBundleIdentifier</key>
+          <string>com.mythetech.smoke.fixture</string>
+          <key>CFBundlePackageType</key>
+          <string>APPL</string>
+        </dict>
+        </plist>
+        PLIST
+        done
+
+        cat > fixtures/legacy/build/Fixture.app/Contents/MacOS/Fixture <<'SCRIPT'
+        #!/bin/bash
+        sleep 120
+        SCRIPT
+
+        cat > fixtures/pass/build/Fixture.app/Contents/MacOS/Fixture <<'SCRIPT'
+        #!/bin/bash
+        echo "HERMES_SMOKE_START: Fixture 1.0.0 macOS arm64"
+        sleep 0.2
+        echo "HERMES_SMOKE_MILESTONE: window-shown 5ms"
+        sleep 0.2
+        echo "HERMES_SMOKE_RESULT: PASSED (0 checks)"
+        exit 0
+        SCRIPT
+
+        cat > fixtures/fail/build/Fixture.app/Contents/MacOS/Fixture <<'SCRIPT'
+        #!/bin/bash
+        echo "HERMES_SMOKE_START: Fixture 1.0.0 macOS arm64"
+        sleep 0.2
+        echo "HERMES_SMOKE_RESULT: FAILED (1/1 checks failed, 0 errors)"
+        exit 1
+        SCRIPT
+
+        for name in legacy pass fail; do
+          chmod +x "fixtures/$name/build/Fixture.app/Contents/MacOS/Fixture"
+          (cd "fixtures/$name/build" && ditto -c -k --keepParent Fixture.app "../releases/Fixture-Portable.zip")
+        done
+
+    - name: Run legacy fixture
+      id: legacy
+      uses: ./actions/smoke-test
+      with:
+        app_name: Fixture
+        platform: ${{ runner.os }}
+        releases_dir: fixtures/legacy/releases
+        output_dir: fixtures/legacy/output
+        timeout: '20'
+
+    - name: Run passing fixture
+      id: pass
+      uses: ./actions/smoke-test
+      with:
+        app_name: Fixture
+        platform: ${{ runner.os }}
+        releases_dir: fixtures/pass/releases
+        output_dir: fixtures/pass/output
+        timeout: '20'
+
+    - name: Run failing fixture
+      id: fail
+      continue-on-error: true
+      uses: ./actions/smoke-test
+      with:
+        app_name: Fixture
+        platform: ${{ runner.os }}
+        releases_dir: fixtures/fail/releases
+        output_dir: fixtures/fail/output
+        timeout: '20'
+
+    - name: Assert outputs
+      shell: bash
+      run: |
+        status=0
+
+        if [ "${{ steps.legacy.outputs.result }}" != "passed" ]; then
+          echo "::error::legacy fixture expected result=passed, got '${{ steps.legacy.outputs.result }}'"
+          status=1
+        fi
+
+        if [ "${{ steps.pass.outputs.result }}" != "passed" ]; then
+          echo "::error::passing fixture expected result=passed, got '${{ steps.pass.outputs.result }}'"
+          status=1
+        fi
+
+        if [ "${{ steps.fail.outputs.result }}" != "failed" ]; then
+          echo "::error::failing fixture expected result=failed, got '${{ steps.fail.outputs.result }}'"
+          status=1
+        fi
+
+        exit $status
