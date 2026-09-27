@@ -142,8 +142,19 @@ jobs:
 | `storage_container` | **Yes** | - | Container for releases |
 | `releases_container` | No | `releases` | Container for Velopack auto-update |
 | `enable_signing` | No | `true` | Enable code signing |
-| `enable_smoke_tests` | No | `true` | Enable smoke tests |
+| `enable_smoke_tests` | No | `true` | Smoke test the packaged builds before releasing; a failed smoke test stops the release |
+| `smoke_timeout` | No | `60` | Smoke run budget in seconds (`HERMES_SMOKE_TEST_TIMEOUT`); keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup |
+| `require_verdict` | No | `false` | Fail apps that predate Hermes smoke mode instead of accepting a liveness check |
 | `enable_blob_upload` | No | `true` | Enable Azure uploads |
+
+Jobs run in the order `test`, `publish` (build, sign, pack), `smoke-test`, `release` (Azure Blob
+upload). `release` waits for every platform's smoke test, so a build that fails smoke testing is
+never uploaded. With `enable_smoke_tests: false` the release runs straight after `publish`.
+
+Because `release` waits for every platform, one platform's failed publish or smoke test holds back
+the upload for all platforms. Use "Re-run failed jobs" to recover while the publish artifacts still
+exist (they are kept for 3 days); after that, re-run all jobs. With `enable_blob_upload: false`,
+`release` is skipped and the publish artifacts expire on their own.
 
 #### Required Secrets
 
@@ -221,6 +232,8 @@ requests. Tests and smoke tests run in parallel.
 | `test_command` | No | - | Override the entire test command |
 | `test_runner` | No | `auto` | `auto`, `vstest` or `mtp` |
 | `enable_coverage` | No | `false` | Collect code coverage for the unit tests |
+| `smoke_timeout` | No | `60` | Smoke run budget in seconds (`HERMES_SMOKE_TEST_TIMEOUT`); keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup |
+| `require_verdict` | No | `false` | Fail apps that predate Hermes smoke mode instead of accepting a liveness check |
 
 The packages are unsigned, so the macOS signing-specific bundle restructuring from
 `desktop-publish.yml` is not exercised here.
@@ -246,7 +259,10 @@ Signs and notarizes a macOS application bundle.
 
 ### `actions/smoke-test`
 
-Verifies that a desktop application can launch and display a window.
+Launches a packaged app with `HERMES_SMOKE_TEST=1` and judges the run by the verdict the app
+prints (`HERMES_SMOKE_RESULT`) or writes (`HERMES_SMOKE_TEST_RESULT` JSON). Apps built on a Hermes
+version without smoke mode never print `HERMES_SMOKE_START`; for those the action falls back to a
+liveness check with a warning, unless `require_verdict` is `true`.
 
 ```yaml
 - uses: mythetech/workflows/actions/smoke-test@main
@@ -254,7 +270,34 @@ Verifies that a desktop application can launch and display a window.
     app_name: "MyApp"
     platform: "Windows"  # or "macOS" or "Linux"
     releases_dir: "releases"
+    timeout: "60"             # optional
+    require_verdict: "false"  # optional
+    output_dir: "smoke-output"  # optional
 ```
+
+`output_dir` receives `app-stdout.log`, `app-stderr.log`, `run.json`, `result.json` (apps on a
+smoke-aware Hermes only), and a screenshot on failure. Upload it with `if: always()`.
+
+### `actions/smoke-verdict`
+
+The verdict step on its own, for pipelines that launch the app themselves. `output_dir` must hold
+`app-stdout.log` and `run.json`, and optionally `app-stderr.log` and `result.json`. `run.json` is
+required; without it the action reports a launcher failure rather than guessing at the app's own
+verdict. `actions/smoke-test` writes `run.json` via `Start-SmokeRun.ps1`, in the shape
+`{ "mode": "verdict" | "legacy", "exitCode": <int or null>, "timedOut": <bool>, "legacyAlive": <bool> }`.
+Pipelines that do not want to write `run.json` can dot-source `actions/smoke-verdict/SmokeVerdict.ps1`
+and call `Get-SmokeVerdict` directly, which is what Hermes CI does.
+
+```yaml
+- uses: mythetech/workflows/actions/smoke-verdict@main
+  with:
+    output_dir: "smoke-output"
+    fail_on_failed: "true"
+    require_verdict: "false"  # optional
+    platform: "Windows"  # optional, job summary heading
+```
+
+Outputs: `result` (`passed` or `failed`) and `reason`.
 
 ### `actions/blob-upload`
 

@@ -89,9 +89,17 @@ on:
         type: boolean
         default: true
       enable_smoke_tests:
-        description: 'Enable smoke tests after publishing'
+        description: 'Run smoke tests on the packaged builds before releasing; a failed smoke test stops the release'
         type: boolean
         default: true
+      smoke_timeout:
+        description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT; keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup'
+        type: number
+        default: 60
+      require_verdict:
+        description: 'Fail apps that predate Hermes smoke mode instead of accepting a liveness check'
+        type: boolean
+        default: false
       enable_blob_upload:
         description: 'Enable uploading to Azure Blob Storage'
         type: boolean
@@ -491,22 +499,6 @@ jobs:
       if: matrix.os == 'macos-latest' && inputs.enable_signing && always()
       run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
 
-    # ====================
-    # UPLOAD TO BLOB STORAGE
-    # ====================
-    - name: Upload to Azure Blob Storage
-      if: inputs.enable_blob_upload
-      uses: mythetech/workflows/actions/blob-upload@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
-      with:
-        app_name: ${{ inputs.app_name }}
-        version: ${{ needs.test.outputs.version }}
-        platform: ${{ matrix.platform }}
-        release_dir: releases/${{ matrix.platform }}
-        storage_account: ${{ inputs.storage_account }}
-        storage_container: ${{ inputs.storage_container }}
-        releases_container: ${{ inputs.releases_container }}
-        sas_token: ${{ secrets.BLOB_SAS_TOKEN }}
-
     - name: Upload Release Artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
@@ -531,7 +523,7 @@ jobs:
           - os: ubuntu-latest
             platform: Linux
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 3
+    timeout-minutes: 6
 
     steps:
     - name: Download Build Artifacts
@@ -550,7 +542,7 @@ jobs:
       uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       with:
         repository: mythetech/workflows
-        ref: f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
+        ref: 586f3f549771d0d523007ee4bb8b7cf3fa9d39a9 # pinned, bump on action edit
         path: .workflows
 
     - name: Run Smoke Test
@@ -559,18 +551,68 @@ jobs:
         app_name: ${{ inputs.app_name }}
         platform: ${{ matrix.platform }}
         releases_dir: releases
+        timeout: ${{ inputs.smoke_timeout }}
+        require_verdict: ${{ inputs.require_verdict }}
+        output_dir: smoke-output
 
-    - name: Delete publish artifact (on success)
-      if: success()
+    - name: Upload Smoke Output
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: smoke-output-${{ matrix.platform }}
+        path: smoke-output
+        retention-days: 14
+        if-no-files-found: ignore
+
+  # ====================
+  # RELEASE
+  # ====================
+  # Uploads only after every platform's smoke test passed (or smoke tests are disabled), so a
+  # build that fails its smoke test never reaches users or the auto-updater.
+  release:
+    needs: [test, publish, smoke-test]
+    if: ${{ !cancelled() && inputs.enable_blob_upload && needs.publish.result == 'success' && (needs.smoke-test.result == 'success' || needs.smoke-test.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows
+          - os: macos-latest
+            platform: macOS
+          - os: ubuntu-latest
+            platform: Linux
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
+        path: releases/${{ matrix.platform }}
+
+    # upload-artifact does not keep file modes and blob-upload zips the AppImage as it is on disk,
+    # so restore the executable bit vpk set, or the Linux download would not run.
+    - name: Restore AppImage executable bit
+      if: matrix.platform == 'Linux'
+      run: chmod +x releases/Linux/*.AppImage
+
+    - name: Upload to Azure Blob Storage
+      uses: mythetech/workflows/actions/blob-upload@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
+      with:
+        app_name: ${{ inputs.app_name }}
+        version: ${{ needs.test.outputs.version }}
+        platform: ${{ matrix.platform }}
+        release_dir: releases/${{ matrix.platform }}
+        storage_account: ${{ inputs.storage_account }}
+        storage_container: ${{ inputs.storage_container }}
+        releases_container: ${{ inputs.releases_container }}
+        sas_token: ${{ secrets.BLOB_SAS_TOKEN }}
+
+    - name: Delete publish artifact
       uses: geekyeggo/delete-artifact@176a747ab7e287e3ff4787bf8a148716375ca118 # v6
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         failOnError: false
-
-    - name: Upload Failure Artifacts
-      if: failure()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      with:
-        name: smoke-test-failure-${{ matrix.platform }}
-        path: screenshot-failure.png
-        retention-days: 14

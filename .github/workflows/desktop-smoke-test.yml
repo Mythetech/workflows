@@ -27,6 +27,8 @@
 #       icon_linux: "Horizon/wwwroot/logo.png"
 #       icon_macos: "Horizon/wwwroot/logo.icns"
 #       platforms: ${{ inputs.platforms }}
+#       smoke_timeout: 60        # optional, seconds
+#       require_verdict: false   # optional, set true once the app is on Hermes smoke mode
 #
 # To pin the SDK from the repository's own global.json instead of dotnet_version:
 #       global_json_file: "global.json"
@@ -86,6 +88,14 @@ on:
         default: 'auto'
       enable_coverage:
         description: 'Enable code coverage collection for the unit tests'
+        type: boolean
+        default: false
+      smoke_timeout:
+        description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT; keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup'
+        type: number
+        default: 60
+      require_verdict:
+        description: 'Fail apps that predate Hermes smoke mode instead of accepting a liveness check'
         type: boolean
         default: false
 
@@ -198,17 +208,21 @@ jobs:
       run: vpk pack -u "${{ inputs.app_name }}" -v 0.0.${{ github.run_number }} -o "releases/${{ matrix.platform }}" -p "publish/${{ matrix.rid }}" --icon "${{ steps.icon.outputs.path }}"
 
     - name: Run Smoke Test
-      timeout-minutes: 3
-      uses: mythetech/workflows/actions/smoke-test@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
+      timeout-minutes: 6
+      uses: mythetech/workflows/actions/smoke-test@586f3f549771d0d523007ee4bb8b7cf3fa9d39a9 # pinned, bump on action edit
       with:
         app_name: ${{ inputs.app_name }}
         platform: ${{ matrix.platform }}
         releases_dir: releases/${{ matrix.platform }}
+        timeout: ${{ inputs.smoke_timeout }}
+        require_verdict: ${{ inputs.require_verdict }}
+        output_dir: smoke-output
 
-    - name: Upload Failure Artifacts
-      if: failure()
+    - name: Upload Smoke Output
+      if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
-        name: smoke-test-failure-${{ matrix.platform }}
-        path: screenshot-failure.png
+        name: smoke-output-${{ matrix.platform }}
+        path: smoke-output
         retention-days: 14
+        if-no-files-found: ignore
