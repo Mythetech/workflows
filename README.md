@@ -143,13 +143,18 @@ jobs:
 | `releases_container` | No | `releases` | Container for Velopack auto-update |
 | `enable_signing` | No | `true` | Enable code signing |
 | `enable_smoke_tests` | No | `true` | Smoke test the packaged builds before releasing; a failed smoke test stops the release |
-| `smoke_timeout` | No | `60` | Smoke run budget in seconds (`HERMES_SMOKE_TEST_TIMEOUT`) |
+| `smoke_timeout` | No | `60` | Smoke run budget in seconds (`HERMES_SMOKE_TEST_TIMEOUT`); keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup |
 | `require_verdict` | No | `false` | Fail apps that predate Hermes smoke mode instead of accepting a liveness check |
 | `enable_blob_upload` | No | `true` | Enable Azure uploads |
 
 Jobs run in the order `test`, `publish` (build, sign, pack), `smoke-test`, `release` (Azure Blob
 upload). `release` waits for every platform's smoke test, so a build that fails smoke testing is
 never uploaded. With `enable_smoke_tests: false` the release runs straight after `publish`.
+
+Because `release` waits for every platform, one platform's failed publish or smoke test holds back
+the upload for all platforms. Use "Re-run failed jobs" to recover while the publish artifacts still
+exist (they are kept for 3 days); after that, re-run all jobs. With `enable_blob_upload: false`,
+`release` is skipped and the publish artifacts expire on their own.
 
 #### Required Secrets
 
@@ -227,7 +232,7 @@ requests. Tests and smoke tests run in parallel.
 | `test_command` | No | - | Override the entire test command |
 | `test_runner` | No | `auto` | `auto`, `vstest` or `mtp` |
 | `enable_coverage` | No | `false` | Collect code coverage for the unit tests |
-| `smoke_timeout` | No | `60` | Smoke run budget in seconds (`HERMES_SMOKE_TEST_TIMEOUT`) |
+| `smoke_timeout` | No | `60` | Smoke run budget in seconds (`HERMES_SMOKE_TEST_TIMEOUT`); keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup |
 | `require_verdict` | No | `false` | Fail apps that predate Hermes smoke mode instead of accepting a liveness check |
 
 The packages are unsigned, so the macOS signing-specific bundle restructuring from
@@ -267,11 +272,11 @@ liveness check with a warning, unless `require_verdict` is `true`.
     releases_dir: "releases"
     timeout: "60"             # optional
     require_verdict: "false"  # optional
-    output_dir: "smoke-output"
+    output_dir: "smoke-output"  # optional
 ```
 
-`output_dir` receives `app-stdout.log`, `app-stderr.log`, `result.json`, `run.json`, and a
-screenshot on failure. Upload it with `if: always()`.
+`output_dir` receives `app-stdout.log`, `app-stderr.log`, `run.json`, `result.json` (apps on a
+smoke-aware Hermes only), and a screenshot on failure. Upload it with `if: always()`.
 
 ### `actions/smoke-verdict`
 

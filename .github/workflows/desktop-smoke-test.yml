@@ -91,7 +91,7 @@ on:
         type: boolean
         default: false
       smoke_timeout:
-        description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT'
+        description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT; keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup'
         type: number
         default: 60
       require_verdict:
