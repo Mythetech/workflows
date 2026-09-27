@@ -93,7 +93,7 @@ on:
         type: boolean
         default: true
       smoke_timeout:
-        description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT'
+        description: 'Smoke run budget in seconds, passed to the app as HERMES_SMOKE_TEST_TIMEOUT; keep it at 180 or below, because the smoke job has a fixed 6-minute timeout that also covers setup'
         type: number
         default: 60
       require_verdict:
@@ -592,6 +592,12 @@ jobs:
       with:
         name: ${{ inputs.app_name }}-${{ matrix.platform }}-${{ needs.test.outputs.version }}
         path: releases/${{ matrix.platform }}
+
+    # upload-artifact does not keep file modes and blob-upload zips the AppImage as it is on disk,
+    # so restore the executable bit vpk set, or the Linux download would not run.
+    - name: Restore AppImage executable bit
+      if: matrix.platform == 'Linux'
+      run: chmod +x releases/Linux/*.AppImage
 
     - name: Upload to Azure Blob Storage
       uses: mythetech/workflows/actions/blob-upload@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
