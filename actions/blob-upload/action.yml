@@ -196,12 +196,19 @@ runs:
         for file in "$RELEASE_DIR"/*; do
           if [ -f "$file" ]; then
             filename=$(basename "$file")
+            # The feed and installers keep their names across releases, so the CDN must revalidate them
+            # or clients keep being served the previous release. Packages are named by version.
+            case "$filename" in
+              *.nupkg) cache_args=() ;;
+              *) cache_args=(--content-cache-control "no-cache") ;;
+            esac
             echo "Uploading: $filename"
             az storage blob upload \
               --account-name "${{ inputs.storage_account }}" \
               --container-name "${{ inputs.releases_container }}" \
               --name "$APP_NAME_LOWER/$BLOB_PLATFORM/$filename" \
               --file "$file" \
+              "${cache_args[@]}" \
               --overwrite \
               --sas-token "${{ inputs.sas_token }}"
           fi
