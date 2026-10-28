@@ -600,7 +600,7 @@ jobs:
       run: chmod +x releases/Linux/*.AppImage
 
     - name: Upload to Azure Blob Storage
-      uses: mythetech/workflows/actions/blob-upload@f61f736e5f147fc8aec6cc245365adbab4fa280b # pinned, bump on action edit
+      uses: mythetech/workflows/actions/blob-upload@b944c209281beeb56030d19019d15fded331751e # pinned, bump on action edit
       with:
         app_name: ${{ inputs.app_name }}
         version: ${{ needs.test.outputs.version }}
