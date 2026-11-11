@@ -111,7 +111,7 @@ jobs:
   # Unit tests go through pr-test.yml so VSTest/MTP detection and coverage behave exactly as on PRs.
   test:
     if: inputs.enable_tests
-    uses: mythetech/workflows/.github/workflows/pr-test.yml@3c18d13a3b1c16396171ff95a3f75ba21db57de7 # pinned, bump on workflow edit
+    uses: mythetech/workflows/.github/workflows/pr-test.yml@d4fa74b4cdb19a9f57abcddf368b406cc4fd557d # pinned, bump on workflow edit
     with:
       dotnet_version: ${{ inputs.dotnet_version }}
       global_json_file: ${{ inputs.global_json_file }}
