@@ -212,7 +212,8 @@ jobs:
     - name: Generate coverage report
       if: inputs.enable_coverage && always()
       run: |
-        dotnet tool install -g dotnet-reportgenerator-globaltool || true
+        # Held below 5.6.0, whose net11.0 build is what a .NET 11 prerelease SDK installs and cannot run.
+        dotnet tool install -g dotnet-reportgenerator-globaltool --version 5.5.12 || true
 
         COVERAGE_FILE=$(find ./TestResults -name "*.cobertura.xml" 2>/dev/null | head -1)
 
